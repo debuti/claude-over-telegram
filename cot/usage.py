@@ -28,7 +28,7 @@ def _token() -> str:
         creds = json.loads((config_dir / ".credentials.json").read_text())
         return creds["claudeAiOauth"]["accessToken"]
     except (OSError, ValueError, KeyError):
-        raise Unavailable("no Claude subscription login found (API keys have no plan limits)")
+        raise Unavailable("no Claude subscription login found (API keys have no plan limits)") from None
 
 
 def _bar(percent: float, width: int = 10) -> str:
@@ -39,7 +39,7 @@ def _bar(percent: float, width: int = 10) -> str:
 def _until(iso: str | None) -> str:
     if not iso:
         return ""
-    secs = int((datetime.fromisoformat(iso) - datetime.now(timezone.utc)).total_seconds())
+    secs = int((datetime.fromisoformat(iso.replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds())
     if secs <= 0:
         return "resets now"
     days, rest = divmod(secs, 86400)

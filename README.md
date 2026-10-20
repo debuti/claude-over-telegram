@@ -1,5 +1,7 @@
 # claude-over-telegram
 
+[![check](https://github.com/debuti/claude-over-telegram/actions/workflows/check.yml/badge.svg)](https://github.com/debuti/claude-over-telegram/actions/workflows/check.yml)
+
 Talk to [Claude Code](https://code.claude.com) from Telegram. A small Python bot
 drives Claude Code through the
 [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/python) and relays
@@ -240,6 +242,23 @@ sudo apparmor_parser -r /etc/apparmor.d/bwrap
 `bypassPermissions` mode skips all of this for Bash: avoid it unless the
 sandbox is on.
 
+## Security
+
+Read this before exposing the bot to anyone but yourself.
+
+- **Allowed users run code on your machine.** Anyone in `ALLOWED_USER_IDS`
+  can make Claude run commands with your user's rights and spend your Claude
+  plan. Only add people you would hand your SSH session to.
+- **Keep the token secret.** The bot token in `.env` is enough to impersonate
+  the bot (though not to use it: messages from unknown users are ignored).
+  If it leaks, revoke it in @BotFather (`/revoke`).
+- **What you send goes through Telegram.** Messages, files and Claude's
+  replies (code included) are stored on Telegram's servers like any other
+  chat. Bot chats are not end-to-end encrypted.
+- **Permission modes still apply.** In `default` mode every risky action asks
+  for your OK; `auto` and `bypassPermissions` don't. With either, turn on
+  `SANDBOX_BASH` (see [Confinement](#confinement)).
+
 ## Updating
 
 ```sh
@@ -262,6 +281,24 @@ systemctl --user restart claude-over-telegram   # or ./stop.sh && ./run.sh …
   different `PATH`; rerun `install-service.sh` from a shell where they work.
 - **Topics don't show up in the private chat.** Turn on *Threaded Mode* for the
   bot in @BotFather.
+
+## Contributing
+
+Issues and pull requests are welcome. The code is small:
+
+| File                 | What it does                                               |
+|----------------------|------------------------------------------------------------|
+| `cot/bot.py`         | Telegram side: auth, commands, routing chats to sessions  |
+| `cot/session.py`     | One Claude conversation through the Agent SDK             |
+| `cot/output.py`      | Sends a conversation's output to its chat (live activity) |
+| `cot/render.py`      | Markdown to Telegram HTML, one-line tool call summaries   |
+| `cot/permissions.py` | Permission prompts as buttons                              |
+| `cot/jail.py`        | Hook that keeps file writes inside the working folder     |
+| `cot/usage.py`       | Plan usage for `/usage`                                    |
+| `cot/uploads.py`, `cot/tg_tools.py` | Files from and to Telegram                  |
+| `cot/store.py`, `cot/config.py`     | Saved conversations, settings               |
+
+Run `ruff check .` before sending changes; CI runs it on Python 3.10 and 3.13.
 
 ## Ideas for later
 

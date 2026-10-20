@@ -17,7 +17,10 @@ MAX_UPLOAD = 50 * 1024 * 1024  # Bot API limit for files sent by bots
 SEND_FILE_SCHEMA = {
     "type": "object",
     "properties": {
-        "path": {"type": "string", "description": "File to send; relative paths are resolved against the working directory."},
+        "path": {
+            "type": "string",
+            "description": "File to send; relative paths are resolved against the working directory.",
+        },
         "caption": {"type": "string", "description": "Optional short text shown under the file."},
     },
     "required": ["path"],

@@ -21,9 +21,9 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from . import permissions, tg_tools
 from .jail import make_hook
 from .output import TelegramOutput
-from . import permissions, tg_tools
 from .store import ConvState
 
 log = logging.getLogger(__name__)

@@ -12,7 +12,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny, PermissionUpdate, ToolPermissionContext
+from claude_agent_sdk import (
+    PermissionResultAllow,
+    PermissionResultDeny,
+    PermissionUpdate,
+    ToolPermissionContext,
+)
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from .output import TelegramOutput
@@ -60,8 +65,8 @@ def _details(tool: str, inp: dict[str, Any]) -> str:
             return f"<pre>{esc(_clip(inp.get('command', '')))}</pre>{desc}"
         case "Edit":
             diff = "\n".join(
-                [f"- {l}" for l in inp.get("old_string", "").splitlines()]
-                + [f"+ {l}" for l in inp.get("new_string", "").splitlines()]
+                [f"- {line}" for line in inp.get("old_string", "").splitlines()]
+                + [f"+ {line}" for line in inp.get("new_string", "").splitlines()]
             )
             return f"<pre><code class=\"language-diff\">{esc(_clip(diff))}</code></pre>"
         case "Write":
@@ -92,7 +97,9 @@ def _keyboard(req_id: str, always: bool, plan: bool) -> InlineKeyboardMarkup:
 def make_can_use_tool(out: TelegramOutput, cwd, on_wait: Callable[[bool], None]):
     async def can_use_tool(tool: str, inp: dict[str, Any], ctx: ToolPermissionContext):
         if tool == "AskUserQuestion":
-            return PermissionResultDeny(message="AskUserQuestion is unavailable: ask the user in plain text and end your turn.")
+            return PermissionResultDeny(
+                message="AskUserQuestion is unavailable: ask the user in plain text and end your turn."
+            )
 
         await out.flush()
         plan = tool == "ExitPlanMode"
@@ -131,7 +138,11 @@ def make_can_use_tool(out: TelegramOutput, cwd, on_wait: Callable[[bool], None])
             return PermissionResultAllow()
         if choice == ALWAYS:
             return PermissionResultAllow(updated_permissions=updates)
-        reason = "The user rejected the plan; keep planning and ask what to change." if plan else "The user denied this action from Telegram."
+        reason = (
+            "The user rejected the plan; keep planning and ask what to change."
+            if plan
+            else "The user denied this action from Telegram."
+        )
         if choice == STOPPED:
             reason = "The user stopped the current task."
         elif choice == "expired":

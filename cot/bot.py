@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-
 from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -191,7 +190,9 @@ class Bot:
             first = key not in self.held
             self.held.setdefault(key, []).append(text)
             if first:
-                await self._folder_picker(key, "Pick the folder for this topic; your message goes to Claude right after:")
+                await self._folder_picker(
+                    key, "Pick the folder for this topic; your message goes to Claude right after:"
+                )
             return
         sess = self._session(key)
         await sess.send(text)
@@ -333,7 +334,9 @@ class Bot:
             [InlineKeyboardButton(f"{'● ' if lvl == sess.state.tools else ''}{desc}", callback_data=f"tools:{lvl}")]
             for lvl, desc in TOOL_LEVELS.items()
         ]
-        await sess.out.send_html(f"Tool activity: <b>{sess.state.tools}</b>", reply_markup=InlineKeyboardMarkup(buttons))
+        await sess.out.send_html(
+            f"Tool activity: <b>{sess.state.tools}</b>", reply_markup=InlineKeyboardMarkup(buttons)
+        )
 
     async def _set_tools(self, sess: Session, level: str) -> None:
         if level not in TOOL_LEVELS:
@@ -430,7 +433,8 @@ class Bot:
             log.exception("context usage failed")
             context = None
         if context:
-            lines.append(f"context: {context['percentage']:.0f}% ({context['totalTokens'] // 1000}k / {context['maxTokens'] // 1000}k tokens)")
+            used, total = context["totalTokens"] // 1000, context["maxTokens"] // 1000
+            lines.append(f"context: {context['percentage']:.0f}% ({used}k / {total}k tokens)")
         await self._output(key).notice("\n".join(lines))
 
     async def _cmd_cost(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

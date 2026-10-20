@@ -36,7 +36,7 @@ def _inline(line: str) -> str:
             out.append(f"<code>{esc(part)}</code>")
             continue
         s = esc(part)
-        s = LINK.sub(lambda m: f'<a href="{m[2].replace('"', "%22")}">{m[1]}</a>', s)
+        s = LINK.sub(lambda m: '<a href="{}">{}</a>'.format(m[2].replace('"', "%22"), m[1]), s)
         s = BOLD.sub(lambda m: f"<b>{m[1] or m[2]}</b>", s)
         s = ITALIC.sub(r"<i>\1</i>", s)
         s = STRIKE.sub(r"<s>\1</s>", s)
@@ -49,7 +49,7 @@ def _text_units(text: str) -> list[str]:
     units = []
     for para in re.split(r"\n\s*\n", text.strip("\n")):
         lines = para.split("\n")
-        if all(l.lstrip().startswith("|") for l in lines):
+        if all(line.lstrip().startswith("|") for line in lines):
             units.append(f"<pre>{esc(para)}</pre>")
             continue
         rendered = []

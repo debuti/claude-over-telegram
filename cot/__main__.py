@@ -38,7 +38,7 @@ def main() -> None:
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        raise SystemExit("another instance is already running")
+        raise SystemExit("another instance is already running") from None
 
     Bot(cfg).run()
 

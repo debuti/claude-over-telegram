@@ -53,7 +53,9 @@ def make_hook(jail: Path) -> HookMatcher:
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason": f"{raw} is outside the working directory {jail}; files can only be written inside it.",
+                "permissionDecisionReason": (
+                    f"{raw} is outside the working directory {jail}; files can only be written inside it."
+                ),
             }
         }
 
