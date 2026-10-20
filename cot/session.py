@@ -77,6 +77,8 @@ class Session:
             disallowed_tools=["AskUserQuestion"],
             # Stream events tell when thinking starts, so the chat can show it live.
             include_partial_messages=True,
+            # The SDK's 1 MB default per message is too small for image/PDF reads (base64).
+            max_buffer_size=64 * 1024 * 1024,
             mcp_servers={tg_tools.SERVER: tg_tools.make_server(self.out, Path(self.state.cwd))},
             allowed_tools=[tg_tools.SEND_FILE],
             system_prompt={"type": "preset", "preset": "claude_code", "append": APPEND_PROMPT},
