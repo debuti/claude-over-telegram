@@ -26,8 +26,11 @@ the Telegram users you allow can talk to it.
 ## Running
 
 ```sh
-.venv/bin/python -m cot /path/to/project   # default: current directory
+.venv/bin/python -m cot /path/to/workdir   # default: current directory
 ```
+
+The workdir can be a single project or a folder of projects: each conversation
+works in the workdir or in one of its subdirectories (see `/cwd`).
 
 To keep it running after closing an SSH session:
 
@@ -47,6 +50,8 @@ working are queued. Tool calls show up as a compact, live-updated list
 
 | Command    | What it does                                         |
 |------------|------------------------------------------------------|
+| `/help`    | List commands                                        |
+| `/cwd`     | Directory of this conversation (inside the workdir)  |
 | `/new`     | Start a fresh conversation                           |
 | `/stop`    | Interrupt Claude and drop queued messages            |
 | `/tools`   | Tool activity: hidden, calls, or calls with output   |
@@ -66,6 +71,24 @@ Photos, documents, videos and audio you send are saved to `.tg-uploads/` in the
 workdir (ignored by git) and Claude is told where they are; it can view images
 and read text files with its own tools. Albums arrive as a single message. The
 Bot API caps downloads at 20 MB.
+
+Claude can send you files too (images show inline), through a `send_file`
+tool the bot gives it. Just ask: "send me the build log".
+
+## Parallel conversations
+
+Each Telegram topic is an independent conversation, with its own Claude
+process, queue, directory, mode and model. Use either:
+
+- **Topics in the private chat with the bot**: turn on *Threaded Mode* for the
+  bot in @BotFather, then create topics in the chat.
+- **A forum group**: create a group, enable Topics, add the bot as an admin
+  (so it sees all messages).
+
+A topic named like a subdirectory of the workdir starts working there; otherwise
+pick one with `/cwd`. Writes are confined to the conversation's directory. Idle
+conversations stop their Claude process after 30 minutes and resume on the next
+message.
 
 Conversations survive restarts (they are resumed from `state/sessions.json`).
 
@@ -94,9 +117,7 @@ sudo apparmor_parser -r /etc/apparmor.d/bwrap
 ## Ideas for later
 
 - A systemd user service (with `loginctl enable-linger`) to start on boot and restart on failure.
-- Parallel conversations, one per Telegram forum topic (state is already keyed by topic).
 - Local voice-note transcription (e.g. whisper), so no Claude tokens are spent on it.
-- Letting Claude send files back (a small MCP tool).
 
 ## License
 

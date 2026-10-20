@@ -22,15 +22,17 @@ from claude_agent_sdk import (
 
 from .jail import make_hook
 from .output import TelegramOutput
-from . import permissions
+from . import permissions, tg_tools
 from .store import ConvState
 
 log = logging.getLogger(__name__)
 
 APPEND_PROMPT = (
     "The user is talking to you through a Telegram chat, not a terminal. "
-    "Never use the AskUserQuestion tool: when you need input, ask in plain text and end your turn."
+    "Never use the AskUserQuestion tool: when you need input, ask in plain text and end your turn. "
+    "To give the user a file, send it with the send_file tool."
 )
+IDLE_DISCONNECT = 30 * 60  # stop the idle Claude process; the next message resumes it
 
 OnState = Callable[[ConvState], None]
 
@@ -72,6 +74,8 @@ class Session:
             permission_mode=self.state.mode or self._default_mode,
             model=self.state.model,
             disallowed_tools=["AskUserQuestion"],
+            mcp_servers={tg_tools.SERVER: tg_tools.make_server(self.out, Path(self.state.cwd))},
+            allowed_tools=[tg_tools.SEND_FILE],
             system_prompt={"type": "preset", "preset": "claude_code", "append": APPEND_PROMPT},
             cli_path=self._cli_path,
             can_use_tool=permissions.make_can_use_tool(self.out, Path(self.state.cwd), self._set_waiting),
@@ -159,6 +163,9 @@ class Session:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        await self._disconnect()
+
+    async def _disconnect(self) -> None:
         if self._client:
             try:
                 await self._client.disconnect()
@@ -168,7 +175,11 @@ class Session:
 
     async def _run(self) -> None:
         while True:
-            text = await self._queue.get()
+            try:
+                text = await asyncio.wait_for(self._queue.get(), IDLE_DISCONNECT)
+            except asyncio.TimeoutError:
+                await self._disconnect()
+                continue
             self.busy = True
             try:
                 if self._client is None:
@@ -180,12 +191,7 @@ class Session:
                 log.exception("turn failed")
                 await self.out.notice(f"⚠️ Error: {e}")
                 # Drop the client so the next message reconnects (resuming the session).
-                if self._client:
-                    try:
-                        await self._client.disconnect()
-                    except Exception:
-                        pass
-                    self._client = None
+                await self._disconnect()
             finally:
                 await self.out.end_turn()
                 self.busy = False

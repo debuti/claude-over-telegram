@@ -3,7 +3,9 @@
 import asyncio
 import logging
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from pathlib import Path
+
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -37,6 +39,18 @@ TOOL_LEVELS = {
     "full": "🔍 tool calls and their output",
 }
 
+COMMANDS = [
+    ("help", "list commands"),
+    ("new", "start a fresh conversation"),
+    ("stop", "interrupt Claude and drop queued messages"),
+    ("cwd", "directory this conversation works in"),
+    ("tools", "how much tool activity to show"),
+    ("mode", "permission mode"),
+    ("model", "switch model"),
+    ("status", "what's going on"),
+    ("cost", "estimated cost of this conversation"),
+]
+
 MODELS = {
     "claude-fable-5-1": "Fable 5.1",
     "claude-opus-5-5": "Opus 5.5",
@@ -58,11 +72,16 @@ class Bot:
             .concurrent_updates(True)
             .connect_timeout(20)
             .get_updates_connect_timeout(20)
+            .post_init(self._post_init)
             .post_shutdown(self._shutdown)
             .build()
         )
         allowed = filters.User(user_id=cfg.allowed_user_ids)
-        self.app.add_handler(CommandHandler("start", self._cmd_start, filters=allowed))
+        self.app.add_handler(CommandHandler(["start", "help"], self._cmd_help, filters=allowed))
+        self.app.add_handler(CommandHandler("cwd", self._cmd_cwd, filters=allowed))
+        self.app.add_handler(
+            MessageHandler(allowed & filters.StatusUpdate.FORUM_TOPIC_CREATED, self._on_topic_created)
+        )
         self.app.add_handler(CommandHandler("new", self._cmd_new, filters=allowed))
         self.app.add_handler(CommandHandler("tools", self._cmd_tools, filters=allowed))
         self.app.add_handler(CommandHandler("mode", self._cmd_mode, filters=allowed))
@@ -83,13 +102,22 @@ class Bot:
 
     @staticmethod
     def _key(update: Update) -> Key:
-        msg = update.effective_message
-        return (update.effective_chat.id, msg.message_thread_id if msg and msg.is_topic_message else None)
+        msg, chat = update.effective_message, update.effective_chat
+        # In groups, message_thread_id also marks reply threads; only forum topics count.
+        # Private chats only carry it when the bot has topics (threaded mode) on.
+        in_topic = msg and msg.message_thread_id and (msg.is_topic_message or chat.type == chat.PRIVATE)
+        return (chat.id, msg.message_thread_id if in_topic else None)
+
+    def _inside_root(self, path: Path) -> bool:
+        return path.is_dir() and path.is_relative_to(self.cfg.workdir)
 
     def _state(self, key: Key) -> ConvState:
-        """Stored state for this chat, or a fresh one if it belongs to another workdir."""
+        """Stored state for this chat, or a fresh one if its directory is no longer valid."""
+        sess = self.sessions.get(key)
+        if sess:
+            return sess.state
         state = self.store.get(key)
-        if state is None or state.cwd != str(self.cfg.workdir):
+        if state is None or not self._inside_root(Path(state.cwd)):
             state = ConvState(cwd=str(self.cfg.workdir))
         return state
 
@@ -97,14 +125,18 @@ class Bot:
         sess = self.sessions.get(key)
         if sess:
             return sess.out
-        return TelegramOutput(self.app.bot, *key, self.cfg.workdir)
+        return TelegramOutput(self.app.bot, *key, Path(self._state(key).cwd))
+
+    def _rel(self, cwd: str) -> str:
+        rel = Path(cwd).relative_to(self.cfg.workdir)
+        return f"{self.cfg.workdir.name}/{rel}" if rel != Path(".") else f"{self.cfg.workdir.name}/"
 
     def _session(self, key: Key) -> Session:
         sess = self.sessions.get(key)
         if sess:
             return sess
         state = self._state(key)
-        out = TelegramOutput(self.app.bot, *key, self.cfg.workdir)
+        out = TelegramOutput(self.app.bot, *key, Path(state.cwd))
         out.tools = state.tools
         sess = Session(
             state,
@@ -144,7 +176,7 @@ class Bot:
         key = self._key(update)
         msg = update.effective_message
         try:
-            line = await uploads.save(msg, self.cfg.workdir)
+            line = await uploads.save(msg, Path(self._state(key).cwd))
         except uploads.TooLarge as e:
             await self._output(key).notice(f"⚠️ {e}")
             return
@@ -168,21 +200,74 @@ class Bot:
         self.albums.pop(group, None)
         await self._submit(key, text)
 
-    async def _cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _post_init(self, app: Application) -> None:
+        # Fills Telegram's command menu (the "/" button).
+        await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in COMMANDS])
+
+    async def _cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
+        cmds = "\n".join(f"/{name}  {desc}" for name, desc in COMMANDS)
         await self._output(key).notice(
             f"Claude Code over Telegram v{__version__}\n"
-            f"workdir: {self.cfg.workdir}\n\n"
-            "Write to talk to Claude.\n"
-            "/new  start a fresh conversation\n"
-            "/stop  interrupt Claude and drop queued messages\n"
-            "/tools  how much tool activity to show\n"
-            "/mode  permission mode\n"
-            "/model  switch model\n"
-            "/status  what's going on\n"
-            "/cost  estimated cost of this conversation\n"
-            "Other /commands are passed to Claude (e.g. /compact)."
+            f"working in: {self._rel(self._state(key).cwd)}\n\n"
+            "Write to talk to Claude; send files and it gets them too.\n\n"
+            f"{cmds}\n\n"
+            "Other /commands are passed to Claude (e.g. /compact).\n"
+            "Parallel conversations: one per Telegram topic, each with its own /cwd."
         )
+
+    def _subdirs(self) -> list[str]:
+        return sorted(
+            p.name for p in self.cfg.workdir.iterdir() if p.is_dir() and not p.name.startswith(".")
+        )
+
+    async def _cmd_cwd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        key = self._key(update)
+        if ctx.args:
+            await self._set_cwd(key, " ".join(ctx.args))
+            return
+        current = self._state(key).cwd
+        # callback_data is capped at 64 bytes: longer names must be typed with /cwd <dir>.
+        names = [n for n in self._subdirs() if len(f"cwd:{n}".encode()) <= 64][:40]
+        buttons = [
+            [InlineKeyboardButton(f"{'● ' if str(self.cfg.workdir / n) == current else ''}📁 {n}", callback_data=f"cwd:{n}")]
+            for n in [".", *names]
+        ]
+        await self._output(key).send_html(
+            f"Working in <b>{self._rel(current)}</b>. Pick a directory (starts a new conversation):",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _set_cwd(self, key: Key, target: str, quiet_if_same: bool = False) -> None:
+        path = (self.cfg.workdir / Path(target).expanduser()).resolve()
+        if not self._inside_root(path):
+            await self._output(key).notice(f"⚠️ {target} is not a directory inside {self.cfg.workdir}")
+            return
+        old = self._state(key)
+        if str(path) == old.cwd and quiet_if_same:
+            return
+        sess = self.sessions.pop(key, None)
+        if sess:
+            await sess.close()
+        # A new directory means a new conversation; display preferences carry over.
+        state = ConvState(cwd=str(path), mode=old.mode, model=old.model, tools=old.tools)
+        self.store.put(key, state)
+        msg = f"📁 Working in {self._rel(state.cwd)} (new conversation)"
+        if any(s.state.cwd == state.cwd for k, s in self.sessions.items() if k != key):
+            msg += "\n⚠️ Another conversation is also working in this directory."
+        await self._output(key).notice(msg)
+
+    async def _on_topic_created(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """A new topic named like a directory of the workdir starts working there."""
+        key = self._key(update)
+        name = update.effective_message.forum_topic_created.name.strip()
+        match = next((n for n in self._subdirs() if n.lower() == name.lower()), None)
+        if match:
+            await self._set_cwd(key, match)
+        else:
+            await self._output(key).notice(
+                f"New conversation in {self._rel(self._state(key).cwd)}. Use /cwd to pick another directory."
+            )
 
     async def _cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
@@ -285,7 +370,7 @@ class Bot:
             activity = "working"
         lines = [
             f"📊 v{__version__}",
-            f"workdir: {state.cwd}",
+            f"working in: {self._rel(state.cwd)}",
             f"conversation: {state.session_id or 'new'}",
             f"mode: {state.mode or self.cfg.permission_mode}",
             f"model: {(sess and sess.model) or state.model or 'default'}",
@@ -324,6 +409,10 @@ class Bot:
             await query.answer(None if ok else "This request is no longer active")
             if not ok:
                 await query.edit_message_reply_markup(None)
+        elif kind == "cwd":
+            await query.answer()
+            await query.edit_message_reply_markup(None)
+            await self._set_cwd(key, rest)
         elif kind == "tools":
             await query.answer()
             await query.edit_message_reply_markup(None)

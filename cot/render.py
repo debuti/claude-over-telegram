@@ -172,6 +172,8 @@ def tool_line(name: str, inp: dict[str, Any], cwd: Path) -> str:
             return "📋 Todo\n" + "\n".join(
                 f"{TODO_MARK.get(t.get('status'), '▫️')} {esc(_short(t.get('content', ''), 80))}" for t in todos
             )
+    if name == "mcp__telegram__send_file":
+        return f"📤 {c(_rel(inp.get('path', ''), cwd))}"
     if name.startswith("mcp__"):
         return f"🔌 {esc(name.split('__', 2)[-1])} {c(json.dumps(inp, ensure_ascii=False), 100)}"
     return f"🔧 {esc(name)} {c(json.dumps(inp, ensure_ascii=False), 100)}"

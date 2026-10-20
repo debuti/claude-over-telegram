@@ -21,6 +21,8 @@ from .render import TG_LIMIT, esc, html_to_plain, markdown_to_html, tool_line, t
 log = logging.getLogger(__name__)
 
 EDIT_INTERVAL = 1.5  # seconds between edits of the activity message
+PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+PHOTO_MAX = 10 * 1024 * 1024  # larger images go as documents
 RESULT_PREVIEW = 1500  # "full" mode: longer tool results are sent as a file
 
 
@@ -90,6 +92,16 @@ class TelegramOutput:
             )
         except TelegramError:
             log.exception("send_document failed")
+
+    async def send_path(self, path: Path, caption: str = "") -> None:
+        """Send a local file; images small enough are shown as photos."""
+        await self._close_activity()
+        kwargs = dict(caption=caption[:1024] or None, message_thread_id=self.thread_id)
+        with path.open("rb") as f:
+            if path.suffix.lower() in PHOTO_EXTS and path.stat().st_size <= PHOTO_MAX:
+                await self._call(self.bot.send_photo, self.chat_id, photo=f, **kwargs)
+            else:
+                await self._call(self.bot.send_document, self.chat_id, document=f, filename=path.name, **kwargs)
 
     # --- activity message ---------------------------------------------------
 
@@ -162,7 +174,8 @@ class TelegramOutput:
             await self.send_html(part)
 
     async def tool_use(self, name: str, inp: dict[str, Any], nested: bool) -> None:
-        if self.tools == "hidden":
+        # ToolSearch only loads tool definitions: noise for the user.
+        if self.tools == "hidden" or name == "ToolSearch":
             return
         line = tool_line(name, inp, self.cwd)
         self._activity.append(f"  ↳ {line}" if nested else line)
