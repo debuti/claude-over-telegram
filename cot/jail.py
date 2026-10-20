@@ -1,36 +1,39 @@
-"""Keeps Claude's file tools inside the directory the bot was launched for.
+"""Keeps Claude's file writes inside the directory the bot was launched for.
 
-A PreToolUse hook sees every tool call, whatever the permission mode, and
-denies any file path that resolves (symlinks included) outside the allowed
-roots. Bash is not covered here: it is either sandboxed (SANDBOX_BASH) or
-left to the permission prompt.
+Claude may read anywhere but write only inside the workdir. A PreToolUse hook
+sees every tool call, whatever the permission mode, and denies any write whose
+path resolves (symlinks included) outside the allowed roots. Bash is not
+covered here: it is either sandboxed (SANDBOX_BASH) or left to the permission
+mode.
 """
 
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import HookMatcher
 
-# Tool name -> input field holding the path it touches.
+# Writing tool name -> input field holding the path it writes.
 PATH_FIELDS = {
-    "Read": "file_path",
     "Write": "file_path",
     "Edit": "file_path",
     "MultiEdit": "file_path",
     "NotebookEdit": "notebook_path",
-    "Glob": "path",
-    "Grep": "path",
-    "LS": "path",
 }
 
 
 def allowed_roots(jail: Path) -> list[Path]:
-    """The jail plus Claude Code's own per-project memory and plan files."""
+    """The jail plus Claude Code's own temp dir and per-project memory and plan files."""
     claude_dir = Path.home() / ".claude"
     project = re.sub(r"[^A-Za-z0-9]", "-", str(jail))  # Claude Code's project dir naming
-    return [jail, claude_dir / "projects" / project, claude_dir / "plans"]
+    return [
+        jail,
+        claude_dir / "projects" / project,
+        claude_dir / "plans",
+        Path(tempfile.gettempdir()) / f"claude-{os.getuid()}",
+    ]
 
 
 def make_hook(jail: Path) -> HookMatcher:
@@ -41,8 +44,6 @@ def make_hook(jail: Path) -> HookMatcher:
         inp = input_data.get("tool_input") or {}
         field = PATH_FIELDS.get(tool)
         raw = inp.get(field) if field else None
-        if tool == "Glob" and str(inp.get("pattern", "")).startswith(("/", "~")):
-            raw = inp["pattern"].split("*", 1)[0] or "/"  # absolute pattern: check its fixed prefix
         if not raw:
             return {}
         path = Path(os.path.realpath(jail / Path(raw).expanduser()))
@@ -52,7 +53,7 @@ def make_hook(jail: Path) -> HookMatcher:
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason": f"{raw} is outside the working directory {jail}; only paths inside it are allowed.",
+                "permissionDecisionReason": f"{raw} is outside the working directory {jail}; files can only be written inside it.",
             }
         }
 

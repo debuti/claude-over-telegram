@@ -21,7 +21,7 @@ from .render import TG_LIMIT, esc, html_to_plain, markdown_to_html, tool_line, t
 log = logging.getLogger(__name__)
 
 EDIT_INTERVAL = 1.5  # seconds between edits of the activity message
-RESULT_PREVIEW = 1500  # verbose mode: longer tool results are sent as a file
+RESULT_PREVIEW = 1500  # "full" mode: longer tool results are sent as a file
 
 
 class TelegramOutput:
@@ -30,7 +30,7 @@ class TelegramOutput:
         self.chat_id = chat_id
         self.thread_id = thread_id
         self.cwd = cwd
-        self.verbose = False
+        self.tools = "calls"  # hidden | calls | full
         self._activity_id: int | None = None
         self._activity: list[str] = []
         self._shown = ""
@@ -162,18 +162,20 @@ class TelegramOutput:
             await self.send_html(part)
 
     async def tool_use(self, name: str, inp: dict[str, Any], nested: bool) -> None:
+        if self.tools == "hidden":
+            return
         line = tool_line(name, inp, self.cwd)
         self._activity.append(f"  ↳ {line}" if nested else line)
         await self._schedule_flush()
 
     async def tool_result(self, content: Any, is_error: bool) -> None:
-        if not (self.verbose or is_error):
+        if self.tools == "hidden" or (self.tools == "calls" and not is_error):
             return
         text = tool_result_text(content).strip()
         if not text:
             return
         mark = "❌" if is_error else "↩️"
-        if len(text) > RESULT_PREVIEW and self.verbose:
+        if len(text) > RESULT_PREVIEW and self.tools == "full":
             await self._close_activity()
             await self.send_file("result.txt", text, caption=f"{mark} result ({len(text)} chars)")
             return

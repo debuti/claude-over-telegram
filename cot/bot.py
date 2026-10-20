@@ -31,6 +31,12 @@ MODES = {
     "bypassPermissions": "never ask (Bash is not confined!)",
 }
 
+TOOL_LEVELS = {
+    "hidden": "🔇 only Claude's replies",
+    "calls": "🔧 tool calls (and errors)",
+    "full": "🔍 tool calls and their output",
+}
+
 MODELS = {
     "claude-fable-5-1": "Fable 5.1",
     "claude-opus-5-5": "Opus 5.5",
@@ -58,7 +64,7 @@ class Bot:
         allowed = filters.User(user_id=cfg.allowed_user_ids)
         self.app.add_handler(CommandHandler("start", self._cmd_start, filters=allowed))
         self.app.add_handler(CommandHandler("new", self._cmd_new, filters=allowed))
-        self.app.add_handler(CommandHandler("verbose", self._cmd_verbose, filters=allowed))
+        self.app.add_handler(CommandHandler("tools", self._cmd_tools, filters=allowed))
         self.app.add_handler(CommandHandler("mode", self._cmd_mode, filters=allowed))
         self.app.add_handler(CommandHandler("stop", self._cmd_stop, filters=allowed))
         self.app.add_handler(CommandHandler("model", self._cmd_model, filters=allowed))
@@ -99,7 +105,7 @@ class Bot:
             return sess
         state = self._state(key)
         out = TelegramOutput(self.app.bot, *key, self.cfg.workdir)
-        out.verbose = state.verbose
+        out.tools = state.tools
         sess = Session(
             state,
             out=out,
@@ -170,7 +176,7 @@ class Bot:
             "Write to talk to Claude.\n"
             "/new  start a fresh conversation\n"
             "/stop  interrupt Claude and drop queued messages\n"
-            "/verbose  show or hide tool results\n"
+            "/tools  how much tool activity to show\n"
             "/mode  permission mode\n"
             "/model  switch model\n"
             "/status  what's going on\n"
@@ -189,13 +195,25 @@ class Bot:
         self.store.put(key, state)
         await self._output(key).notice(f"🆕 New conversation in {state.cwd}")
 
-    async def _cmd_verbose(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_tools(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
         sess = self._session(key)
-        sess.state.verbose = not sess.state.verbose
-        sess.out.verbose = sess.state.verbose
-        self.store.put(key, sess.state)
-        await sess.out.notice("🔊 Tool results: shown" if sess.state.verbose else "🔇 Tool results: hidden")
+        if ctx.args:
+            await self._set_tools(sess, ctx.args[0])
+            return
+        buttons = [
+            [InlineKeyboardButton(f"{'● ' if lvl == sess.state.tools else ''}{desc}", callback_data=f"tools:{lvl}")]
+            for lvl, desc in TOOL_LEVELS.items()
+        ]
+        await sess.out.send_html(f"Tool activity: <b>{sess.state.tools}</b>", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _set_tools(self, sess: Session, level: str) -> None:
+        if level not in TOOL_LEVELS:
+            await sess.out.notice(f"Unknown level {level}. Options: {', '.join(TOOL_LEVELS)}")
+            return
+        sess.state.tools = sess.out.tools = level
+        sess.save()
+        await sess.out.notice(f"Tool activity: {TOOL_LEVELS[level]}")
 
     async def _cmd_mode(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
@@ -272,7 +290,7 @@ class Bot:
             f"mode: {state.mode or self.cfg.permission_mode}",
             f"model: {(sess and sess.model) or state.model or 'default'}",
             f"state: {activity}" + (f", {sess.queued} queued" if sess and sess.queued else ""),
-            f"tool results: {'shown' if state.verbose else 'hidden'}",
+            f"tools: {state.tools}",
         ]
         try:
             usage = await sess.context_usage() if sess else None
@@ -306,6 +324,10 @@ class Bot:
             await query.answer(None if ok else "This request is no longer active")
             if not ok:
                 await query.edit_message_reply_markup(None)
+        elif kind == "tools":
+            await query.answer()
+            await query.edit_message_reply_markup(None)
+            await self._set_tools(self._session(key), rest)
         elif kind == "model":
             await query.answer()
             await query.edit_message_reply_markup(None)

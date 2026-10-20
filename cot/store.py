@@ -17,8 +17,14 @@ class ConvState:
     session_id: str | None = None
     mode: str | None = None
     model: str | None = None
-    verbose: bool = False
+    tools: str = "calls"  # hidden | calls | full (calls plus their results)
     cost_usd: float = 0.0  # estimated, accumulated over the whole conversation
+
+
+def _migrate(v: dict) -> dict:
+    if "verbose" in v:  # <= 0.4: a boolean for showing tool results
+        v["tools"] = "full" if v.pop("verbose") else "calls"
+    return v
 
 
 class Store:
@@ -27,7 +33,7 @@ class Store:
         self._data: dict[str, ConvState] = {}
         if path.exists():
             raw = json.loads(path.read_text())
-            self._data = {k: ConvState(**v) for k, v in raw.items()}
+            self._data = {k: ConvState(**_migrate(v)) for k, v in raw.items()}
 
     @staticmethod
     def _k(key: Key) -> str:

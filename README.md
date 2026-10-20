@@ -42,13 +42,14 @@ tail -f state/cot.log
 ## Using it
 
 Write to the bot as you would in the terminal. Messages sent while Claude is
-working are queued. Tool calls show up as a compact, live-updated list.
+working are queued. Tool calls show up as a compact, live-updated list
+(`/tools hidden` to see only Claude's replies).
 
 | Command    | What it does                                         |
 |------------|------------------------------------------------------|
 | `/new`     | Start a fresh conversation                           |
 | `/stop`    | Interrupt Claude and drop queued messages            |
-| `/verbose` | Show or hide tool results                            |
+| `/tools`   | Tool activity: hidden, calls, or calls with output   |
 | `/mode`    | Permission mode (default, acceptEdits, plan, auto…)  |
 | `/model`   | Switch model                                         |
 | `/status`  | Workdir, mode, model, activity, context usage        |
@@ -70,13 +71,25 @@ Conversations survive restarts (they are resumed from `state/sessions.json`).
 
 ## Confinement
 
-Claude works in the directory given at launch. Its file tools (Read, Write,
-Edit, Glob, Grep…) are denied any path outside it, whatever the permission mode.
-Bash is not covered by that check: either keep `PERMISSION_MODE=default` and
-review commands, or set `SANDBOX_BASH=true` so Bash can only write inside the
-directory. The sandbox needs unprivileged
-[bubblewrap](https://github.com/containers/bubblewrap); Ubuntu 24.04+ blocks it
-by default through AppArmor (`kernel.apparmor_restrict_unprivileged_userns=1`).
+Claude can read anywhere but write only inside the directory given at launch.
+Its file-writing tools (Write, Edit, NotebookEdit) are denied any path outside
+it, whatever the permission mode. Bash is not covered by that check: set
+`SANDBOX_BASH=true` so Bash commands can only write inside the directory too.
+
+The sandbox needs unprivileged [bubblewrap](https://github.com/containers/bubblewrap),
+which Ubuntu 24.04+ blocks through AppArmor. To allow it for bwrap only:
+
+```sh
+sudo tee /etc/apparmor.d/bwrap <<'AA'
+abi <abi/4.0>,
+include <tunables/global>
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+AA
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
 
 ## Ideas for later
 

@@ -142,6 +142,9 @@ class Session:
             return None
         return await self._client.get_context_usage()
 
+    def save(self) -> None:
+        self._on_state(self.state)
+
     async def set_mode(self, mode: str) -> None:
         self.state.mode = mode
         self._on_state(self.state)
