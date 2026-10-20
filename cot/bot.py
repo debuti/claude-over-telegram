@@ -15,7 +15,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import permissions
+from . import __version__, permissions
 from .config import Config
 from .output import TelegramOutput
 from .session import Session
@@ -29,6 +29,13 @@ MODES = {
     "plan": "read and plan only, no changes",
     "auto": "a classifier approves or denies each call",
     "bypassPermissions": "never ask (Bash is not confined!)",
+}
+
+MODELS = {
+    "claude-fable-5-1": "Fable 5.1",
+    "claude-opus-5-5": "Opus 5.5",
+    "claude-sonnet-5-5": "Sonnet 5.5",
+    "claude-haiku-5-5": "Haiku 5.5",
 }
 
 
@@ -52,6 +59,10 @@ class Bot:
         self.app.add_handler(CommandHandler("new", self._cmd_new, filters=allowed))
         self.app.add_handler(CommandHandler("verbose", self._cmd_verbose, filters=allowed))
         self.app.add_handler(CommandHandler("mode", self._cmd_mode, filters=allowed))
+        self.app.add_handler(CommandHandler("stop", self._cmd_stop, filters=allowed))
+        self.app.add_handler(CommandHandler("model", self._cmd_model, filters=allowed))
+        self.app.add_handler(CommandHandler("status", self._cmd_status, filters=allowed))
+        self.app.add_handler(CommandHandler("cost", self._cmd_cost, filters=allowed))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         # Unknown /commands fall through to here and reach Claude (e.g. /compact).
         self.app.add_handler(MessageHandler(allowed & filters.TEXT, self._on_text))
@@ -121,12 +132,16 @@ class Bot:
     async def _cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
         await self._output(key).notice(
-            f"Claude Code over Telegram\n"
+            f"Claude Code over Telegram v{__version__}\n"
             f"workdir: {self.cfg.workdir}\n\n"
             "Write to talk to Claude.\n"
             "/new  start a fresh conversation\n"
+            "/stop  interrupt Claude and drop queued messages\n"
             "/verbose  show or hide tool results\n"
             "/mode  permission mode\n"
+            "/model  switch model\n"
+            "/status  what's going on\n"
+            "/cost  estimated cost of this conversation\n"
             "Other /commands are passed to Claude (e.g. /compact)."
         )
 
@@ -137,6 +152,7 @@ class Bot:
             await sess.close()
         state = self._state(key)
         state.session_id = None
+        state.cost_usd = 0.0
         self.store.put(key, state)
         await self._output(key).notice(f"🆕 New conversation in {state.cwd}")
 
@@ -173,6 +189,77 @@ class Bot:
             return
         await sess.out.notice(f"🔐 Permission mode: {mode}")
 
+    async def _cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        key = self._key(update)
+        sess = self.sessions.get(key)
+        running, dropped = await sess.stop() if sess else (False, 0)
+        if not running:
+            # When a turn was running, its end reports "Stopped" itself.
+            msg = f"🛑 Dropped {dropped} queued message(s)" if dropped else "Nothing to stop"
+            await self._output(key).notice(msg)
+        elif dropped:
+            await self._output(key).notice(f"Dropped {dropped} queued message(s)")
+
+    async def _cmd_model(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        key = self._key(update)
+        sess = self._session(key)
+        if ctx.args:
+            await self._set_model(sess, ctx.args[0])
+            return
+        current = sess.state.model or "default"
+        buttons = [
+            [InlineKeyboardButton(f"{'● ' if m == current else ''}{name}", callback_data=f"model:{m}")]
+            for m, name in [*MODELS.items(), ("default", "Default (Claude Code's choice)")]
+        ]
+        await sess.out.send_html(f"Model: <b>{current}</b>", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _set_model(self, sess: Session, model: str) -> None:
+        try:
+            await sess.set_model(None if model == "default" else model)
+        except Exception as e:
+            log.exception("set_model failed")
+            await sess.out.notice(f"⚠️ Could not change model: {e}")
+            return
+        await sess.out.notice(f"🧠 Model: {model} (applies from the next message)")
+
+    async def _cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        key = self._key(update)
+        sess = self.sessions.get(key)
+        state = sess.state if sess else self._state(key)
+        if not sess or not sess.pending:
+            activity = "idle"
+        elif sess.waiting:
+            activity = "waiting for your permission"
+        else:
+            activity = "working"
+        lines = [
+            f"📊 v{__version__}",
+            f"workdir: {state.cwd}",
+            f"conversation: {state.session_id or 'new'}",
+            f"mode: {state.mode or self.cfg.permission_mode}",
+            f"model: {(sess and sess.model) or state.model or 'default'}",
+            f"state: {activity}" + (f", {sess.queued} queued" if sess and sess.queued else ""),
+            f"tool results: {'shown' if state.verbose else 'hidden'}",
+        ]
+        try:
+            usage = await sess.context_usage() if sess else None
+        except Exception:
+            log.exception("context usage failed")
+            usage = None
+        if usage:
+            lines.append(f"context: {usage['percentage']:.0f}% ({usage['totalTokens'] // 1000}k / {usage['maxTokens'] // 1000}k tokens)")
+        await self._output(key).notice("\n".join(lines))
+
+    async def _cmd_cost(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        key = self._key(update)
+        sess = self.sessions.get(key)
+        state = sess.state if sess else self._state(key)
+        last = f"\nlast turn: ${sess.last_turn_cost:.4f}" if sess and sess.last_turn_cost is not None else ""
+        await self._output(key).notice(
+            f"💰 This conversation: ${state.cost_usd:.4f}{last}\n"
+            "API-price estimate; on a Claude subscription it counts against your plan limits instead."
+        )
+
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query.from_user or query.from_user.id not in self.cfg.allowed_user_ids:
@@ -186,6 +273,10 @@ class Bot:
             await query.answer(None if ok else "This request is no longer active")
             if not ok:
                 await query.edit_message_reply_markup(None)
+        elif kind == "model":
+            await query.answer()
+            await query.edit_message_reply_markup(None)
+            await self._set_model(self._session(key), rest)
         elif kind == "mode":
             await query.answer()
             await query.edit_message_reply_markup(None)

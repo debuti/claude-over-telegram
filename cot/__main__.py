@@ -1,6 +1,7 @@
 import argparse
 import fcntl
 import logging
+import warnings
 from pathlib import Path
 
 from . import config
@@ -26,6 +27,9 @@ def main() -> None:
     )
     # httpx logs every getUpdates call, which leaks the bot token into the log.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    # can_use_tool stays set in bypassPermissions because /mode can leave it at any time.
+    warnings.filterwarnings("ignore", message="can_use_tool will not be invoked")
 
     cfg = config.load(args.workdir)
 

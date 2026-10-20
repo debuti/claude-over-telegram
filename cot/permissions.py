@@ -27,11 +27,19 @@ DETAIL_LIMIT = 1500
 SAFE_UPDATES = ("addRules", "setMode")
 
 ALLOW, DENY, ALWAYS = "allow", "deny", "always"
-OUTCOME = {ALLOW: "✅ Allowed", DENY: "❌ Denied", ALWAYS: "♾️ Always allowed", "expired": "⌛ Expired (denied)"}
+STOPPED = "stopped"
+OUTCOME = {
+    ALLOW: "✅ Allowed",
+    DENY: "❌ Denied",
+    ALWAYS: "♾️ Always allowed",
+    "expired": "⌛ Expired (denied)",
+    STOPPED: "🛑 Stopped (denied)",
+}
 
 
 @dataclass
 class Pending:
+    out: TelegramOutput
     future: asyncio.Future
     message_id: int | None
     text: str
@@ -107,7 +115,7 @@ def make_can_use_tool(out: TelegramOutput, cwd, on_wait: Callable[[bool], None])
         req_id = secrets.token_hex(6)
         future = asyncio.get_running_loop().create_future()
         message_id = await out.send_html(text, reply_markup=_keyboard(req_id, bool(updates), plan))
-        PENDING[req_id] = Pending(future, message_id, text)
+        PENDING[req_id] = Pending(out, future, message_id, text)
         on_wait(True)
         try:
             choice = await asyncio.wait_for(future, TIMEOUT)
@@ -124,7 +132,9 @@ def make_can_use_tool(out: TelegramOutput, cwd, on_wait: Callable[[bool], None])
         if choice == ALWAYS:
             return PermissionResultAllow(updated_permissions=updates)
         reason = "The user rejected the plan; keep planning and ask what to change." if plan else "The user denied this action from Telegram."
-        if choice == "expired":
+        if choice == STOPPED:
+            reason = "The user stopped the current task."
+        elif choice == "expired":
             reason = "Nobody answered the permission request in time, so it was denied."
         return PermissionResultDeny(message=reason)
 
@@ -154,3 +164,10 @@ async def resolve(out: TelegramOutput, req_id: str, choice: str) -> bool:
     pending.future.set_result(choice)
     await _mark(out, pending, choice)
     return True
+
+
+async def cancel_for(out: TelegramOutput) -> None:
+    """Deny every open request of one conversation (on /stop or shutdown)."""
+    for pending in [p for p in PENDING.values() if p.out is out and not p.future.done()]:
+        pending.future.set_result(STOPPED)
+        await _mark(out, pending, STOPPED)

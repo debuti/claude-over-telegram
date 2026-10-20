@@ -43,8 +43,12 @@ working are queued. Tool calls show up as a compact, live-updated list.
 | Command    | What it does                                         |
 |------------|------------------------------------------------------|
 | `/new`     | Start a fresh conversation                           |
+| `/stop`    | Interrupt Claude and drop queued messages            |
 | `/verbose` | Show or hide tool results                            |
 | `/mode`    | Permission mode (default, acceptEdits, plan, auto…)  |
+| `/model`   | Switch model                                         |
+| `/status`  | Workdir, mode, model, activity, context usage        |
+| `/cost`    | Estimated cost of the conversation                   |
 | `/…`       | Anything else is passed to Claude (e.g. `/compact`)  |
 
 When Claude needs permission (the same cases where the terminal would ask), you

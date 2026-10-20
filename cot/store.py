@@ -18,6 +18,7 @@ class ConvState:
     mode: str | None = None
     model: str | None = None
     verbose: bool = False
+    cost_usd: float = 0.0  # estimated, accumulated over the whole conversation
 
 
 class Store:
