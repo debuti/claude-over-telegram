@@ -187,7 +187,7 @@ class TelegramOutput:
         await self._schedule_flush()
 
     async def thinking_start(self) -> None:
-        if self.tools == "hidden" or self._thinking_since is not None:
+        if self._thinking_since is not None:
             return
         self._thinking_since = time.monotonic()
         self._thinking_task = asyncio.create_task(self._show_thinking())

@@ -163,7 +163,7 @@ systemctl --user daemon-reload
 
 Write to the bot as you would in the terminal. Messages sent while Claude is
 working are queued. Tool calls show up as a compact, live-updated list
-(`/tools hidden` to see only Claude's replies). When Claude thinks for more than
+(`/tools hidden` to see only Claude's replies). Whatever the `/tools` level, when Claude thinks for more than
 a few seconds, a 💭 line shows it (and later for how long); this comes from the
 response stream and costs no tokens.
 
