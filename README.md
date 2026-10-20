@@ -32,8 +32,12 @@ the Telegram users you allow can talk to it.
 To keep it running after closing an SSH session:
 
 ```sh
-setsid nohup .venv/bin/python -m cot /path/to/project >> cot.log 2>&1 &
+./run.sh /path/to/project   # detached; default: current directory
+tail -f state/cot.log
+./stop.sh
 ```
+
+`run.sh` refuses to start a second instance and rotates the log past 10 MB.
 
 ## Using it
 
@@ -57,6 +61,11 @@ rule to the project's `.claude/settings.local.json`, like the terminal does.
 Unanswered requests are denied after 15 minutes. In plan mode, the plan arrives
 with Approve / Keep planning buttons.
 
+Photos, documents, videos and audio you send are saved to `.tg-uploads/` in the
+workdir (ignored by git) and Claude is told where they are; it can view images
+and read text files with its own tools. Albums arrive as a single message. The
+Bot API caps downloads at 20 MB.
+
 Conversations survive restarts (they are resumed from `state/sessions.json`).
 
 ## Confinement
@@ -68,6 +77,13 @@ review commands, or set `SANDBOX_BASH=true` so Bash can only write inside the
 directory. The sandbox needs unprivileged
 [bubblewrap](https://github.com/containers/bubblewrap); Ubuntu 24.04+ blocks it
 by default through AppArmor (`kernel.apparmor_restrict_unprivileged_userns=1`).
+
+## Ideas for later
+
+- A systemd user service (with `loginctl enable-linger`) to start on boot and restart on failure.
+- Parallel conversations, one per Telegram forum topic (state is already keyed by topic).
+- Local voice-note transcription (e.g. whisper), so no Claude tokens are spent on it.
+- Letting Claude send files back (a small MCP tool).
 
 ## License
 

@@ -15,7 +15,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, permissions
+from . import __version__, permissions, uploads
 from .config import Config
 from .output import TelegramOutput
 from .session import Session
@@ -45,6 +45,7 @@ class Bot:
         self.store = Store(cfg.state_dir / "sessions.json")
         self.sessions: dict[Key, Session] = {}
         self.typing: dict[Key, asyncio.Task] = {}
+        self.albums: dict[str, uploads.AlbumCollector] = {}
         self.app = (
             Application.builder()
             .token(cfg.telegram_token)
@@ -66,6 +67,8 @@ class Bot:
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         # Unknown /commands fall through to here and reach Claude (e.g. /compact).
         self.app.add_handler(MessageHandler(allowed & filters.TEXT, self._on_text))
+        media = filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.AUDIO | filters.VOICE
+        self.app.add_handler(MessageHandler(allowed & media, self._on_file))
         self.app.add_handler(MessageHandler(~allowed, self._on_stranger))
 
     def run(self) -> None:
@@ -122,12 +125,42 @@ class Bot:
             await asyncio.sleep(4)
         self.typing.pop(key, None)
 
-    async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        key = self._key(update)
+    async def _submit(self, key: Key, text: str) -> None:
         sess = self._session(key)
-        await sess.send(update.effective_message.text)
+        await sess.send(text)
         if key not in self.typing:
             self.typing[key] = asyncio.create_task(self._keep_typing(key, sess))
+
+    async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._submit(self._key(update), update.effective_message.text)
+
+    async def _on_file(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        key = self._key(update)
+        msg = update.effective_message
+        try:
+            line = await uploads.save(msg, self.cfg.workdir)
+        except uploads.TooLarge as e:
+            await self._output(key).notice(f"⚠️ {e}")
+            return
+        except Exception as e:
+            log.exception("upload failed")
+            await self._output(key).notice(f"⚠️ Could not save the file: {e}")
+            return
+        if msg.voice or msg.audio:
+            line += " (you cannot listen to audio; tell the user if you need a transcript)"
+        if msg.media_group_id:
+            album = self.albums.get(msg.media_group_id)
+            if album is None:
+                group = msg.media_group_id
+                album = uploads.AlbumCollector(lambda text: self._album_done(group, key, text))
+                self.albums[group] = album
+            album.add(line, msg.caption)
+            return
+        await self._submit(key, f"{line}\n{msg.caption}" if msg.caption else line)
+
+    async def _album_done(self, group: str, key: Key, text: str) -> None:
+        self.albums.pop(group, None)
+        await self._submit(key, text)
 
     async def _cmd_start(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
