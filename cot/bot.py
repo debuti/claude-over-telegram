@@ -66,6 +66,8 @@ class Bot:
         self.sessions: dict[Key, Session] = {}
         self.typing: dict[Key, asyncio.Task] = {}
         self.albums: dict[str, uploads.AlbumCollector] = {}
+        # Messages sent to a topic before it has a folder; delivered once one is picked.
+        self.held: dict[Key, list[str]] = {}
         self.app = (
             Application.builder()
             .token(cfg.telegram_token)
@@ -108,8 +110,17 @@ class Bot:
         in_topic = msg and msg.message_thread_id and (msg.is_topic_message or chat.type == chat.PRIVATE)
         return (chat.id, msg.message_thread_id if in_topic else None)
 
-    def _inside_root(self, path: Path) -> bool:
-        return path.is_dir() and path.is_relative_to(self.cfg.workdir)
+    def _valid_cwd(self, key: Key, path: Path) -> bool:
+        """Topics work in a first-level folder of the workdir; the plain chat works in the workdir."""
+        if key[1] is None:
+            return path == self.cfg.workdir
+        return path.is_dir() and path.parent == self.cfg.workdir and not path.name.startswith(".")
+
+    def _assigned(self, key: Key) -> bool:
+        if key[1] is None or key in self.sessions:
+            return True
+        state = self.store.get(key)
+        return state is not None and self._valid_cwd(key, Path(state.cwd))
 
     def _state(self, key: Key) -> ConvState:
         """Stored state for this chat, or a fresh one if its directory is no longer valid."""
@@ -117,15 +128,25 @@ class Bot:
         if sess:
             return sess.state
         state = self.store.get(key)
-        if state is None or not self._inside_root(Path(state.cwd)):
+        if state is None or not self._valid_cwd(key, Path(state.cwd)):
             state = ConvState(cwd=str(self.cfg.workdir))
         return state
+
+    async def _ready(self, key: Key) -> bool:
+        """False (after showing the folder picker) while a topic has no folder yet."""
+        if self._assigned(key):
+            return True
+        await self._folder_picker(key, "This topic has no folder yet. Pick one:")
+        return False
 
     def _output(self, key: Key) -> TelegramOutput:
         sess = self.sessions.get(key)
         if sess:
             return sess.out
         return TelegramOutput(self.app.bot, *key, Path(self._state(key).cwd))
+
+    def _where(self, key: Key) -> str:
+        return self._rel(self._state(key).cwd) if self._assigned(key) else "no folder yet (/cwd)"
 
     def _rel(self, cwd: str) -> str:
         rel = Path(cwd).relative_to(self.cfg.workdir)
@@ -164,6 +185,12 @@ class Bot:
         self.typing.pop(key, None)
 
     async def _submit(self, key: Key, text: str) -> None:
+        if not self._assigned(key):
+            first = key not in self.held
+            self.held.setdefault(key, []).append(text)
+            if first:
+                await self._folder_picker(key, "Pick the folder for this topic; your message goes to Claude right after:")
+            return
         sess = self._session(key)
         await sess.send(text)
         if key not in self.typing:
@@ -175,6 +202,9 @@ class Bot:
     async def _on_file(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
         msg = update.effective_message
+        if not await self._ready(key):
+            await self._output(key).notice("Send the file again once the folder is picked.")
+            return
         try:
             line = await uploads.save(msg, Path(self._state(key).cwd))
         except uploads.TooLarge as e:
@@ -209,7 +239,7 @@ class Bot:
         cmds = "\n".join(f"/{name}  {desc}" for name, desc in COMMANDS)
         await self._output(key).notice(
             f"Claude Code over Telegram v{__version__}\n"
-            f"working in: {self._rel(self._state(key).cwd)}\n\n"
+            f"working in: {self._where(key)}\n\n"
             "Write to talk to Claude; send files and it gets them too.\n\n"
             f"{cmds}\n\n"
             "Other /commands are passed to Claude (e.g. /compact).\n"
@@ -223,29 +253,36 @@ class Bot:
 
     async def _cmd_cwd(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
+        if key[1] is None:
+            await self._output(key).notice(
+                f"This chat works in {self.cfg.workdir}. Folders are picked per topic "
+                "(one first-level folder of the workdir each)."
+            )
+            return
         if ctx.args:
             await self._set_cwd(key, " ".join(ctx.args))
             return
-        current = self._state(key).cwd
-        # callback_data is capped at 64 bytes: longer names must be typed with /cwd <dir>.
-        names = [n for n in self._subdirs() if len(f"cwd:{n}".encode()) <= 64][:40]
-        buttons = [
-            [InlineKeyboardButton(f"{'● ' if str(self.cfg.workdir / n) == current else ''}📁 {n}", callback_data=f"cwd:{n}")]
-            for n in [".", *names]
-        ]
-        await self._output(key).send_html(
-            f"Working in <b>{self._rel(current)}</b>. Pick a directory (starts a new conversation):",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
+        current = self._state(key).cwd if self._assigned(key) else None
+        where = f"Working in <b>{self._rel(current)}</b>. " if current else ""
+        await self._folder_picker(key, f"{where}Pick a folder (starts a new conversation):", current)
 
-    async def _set_cwd(self, key: Key, target: str, quiet_if_same: bool = False) -> None:
-        path = (self.cfg.workdir / Path(target).expanduser()).resolve()
-        if not self._inside_root(path):
-            await self._output(key).notice(f"⚠️ {target} is not a directory inside {self.cfg.workdir}")
+    async def _folder_picker(self, key: Key, prompt: str, current: str | None = None) -> None:
+        # callback_data is capped at 64 bytes: longer names must be typed with /cwd <dir>.
+        names = [n for n in self._subdirs() if len(f"cwd:{n}".encode()) <= 64]
+        if not names:
+            await self._output(key).notice(f"⚠️ {self.cfg.workdir} has no folders to pick from.")
+            return
+        mark = lambda n: "● " if str(self.cfg.workdir / n) == current else ""  # noqa: E731
+        buttons = [InlineKeyboardButton(f"{mark(n)}📁 {n}", callback_data=f"cwd:{n}") for n in names[:90]]
+        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+        await self._output(key).send_html(prompt, reply_markup=InlineKeyboardMarkup(rows))
+
+    async def _set_cwd(self, key: Key, target: str) -> None:
+        path = self.cfg.workdir / target.strip().strip("/")
+        if "/" in target.strip().strip("/") or not self._valid_cwd(key, path):
+            await self._output(key).notice(f"⚠️ {target} is not a first-level folder of {self.cfg.workdir}")
             return
         old = self._state(key)
-        if str(path) == old.cwd and quiet_if_same:
-            return
         sess = self.sessions.pop(key, None)
         if sess:
             await sess.close()
@@ -256,21 +293,23 @@ class Bot:
         if any(s.state.cwd == state.cwd for k, s in self.sessions.items() if k != key):
             msg += "\n⚠️ Another conversation is also working in this directory."
         await self._output(key).notice(msg)
+        for text in self.held.pop(key, []):
+            await self._submit(key, text)
 
     async def _on_topic_created(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """A new topic named like a directory of the workdir starts working there."""
+        """A new topic named like a folder of the workdir works there; otherwise ask for one."""
         key = self._key(update)
         name = update.effective_message.forum_topic_created.name.strip()
         match = next((n for n in self._subdirs() if n.lower() == name.lower()), None)
         if match:
             await self._set_cwd(key, match)
-        else:
-            await self._output(key).notice(
-                f"New conversation in {self._rel(self._state(key).cwd)}. Use /cwd to pick another directory."
-            )
+        elif key not in self.held:
+            await self._ready(key)
 
     async def _cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
+        if not await self._ready(key):
+            return
         sess = self.sessions.pop(key, None)
         if sess:
             await sess.close()
@@ -282,6 +321,8 @@ class Bot:
 
     async def _cmd_tools(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
+        if not await self._ready(key):
+            return
         sess = self._session(key)
         if ctx.args:
             await self._set_tools(sess, ctx.args[0])
@@ -302,6 +343,8 @@ class Bot:
 
     async def _cmd_mode(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
+        if not await self._ready(key):
+            return
         sess = self._session(key)
         if ctx.args:
             await self._set_mode(sess, ctx.args[0])
@@ -338,6 +381,8 @@ class Bot:
 
     async def _cmd_model(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
+        if not await self._ready(key):
+            return
         sess = self._session(key)
         if ctx.args:
             await self._set_model(sess, ctx.args[0])
@@ -370,7 +415,7 @@ class Bot:
             activity = "working"
         lines = [
             f"📊 v{__version__}",
-            f"working in: {self._rel(state.cwd)}",
+            f"working in: {self._where(key)}",
             f"conversation: {state.session_id or 'new'}",
             f"mode: {state.mode or self.cfg.permission_mode}",
             f"model: {(sess and sess.model) or state.model or 'default'}",
@@ -413,6 +458,8 @@ class Bot:
             await query.answer()
             await query.edit_message_reply_markup(None)
             await self._set_cwd(key, rest)
+        elif kind in ("tools", "model", "mode") and not await self._ready(key):
+            await query.answer()
         elif kind == "tools":
             await query.answer()
             await query.edit_message_reply_markup(None)

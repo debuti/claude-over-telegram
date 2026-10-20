@@ -29,8 +29,9 @@ the Telegram users you allow can talk to it.
 .venv/bin/python -m cot /path/to/workdir   # default: current directory
 ```
 
-The workdir can be a single project or a folder of projects: each conversation
-works in the workdir or in one of its subdirectories (see `/cwd`).
+The plain chat with the bot works in the workdir itself. Topics (see
+[Parallel conversations](#parallel-conversations)) each work in one first-level
+folder of it, so point the workdir at your folder of projects to use them.
 
 To keep it running after closing an SSH session:
 
@@ -51,7 +52,7 @@ working are queued. Tool calls show up as a compact, live-updated list
 | Command    | What it does                                         |
 |------------|------------------------------------------------------|
 | `/help`    | List commands                                        |
-| `/cwd`     | Directory of this conversation (inside the workdir)  |
+| `/cwd`     | Folder of this topic (a first-level folder)          |
 | `/new`     | Start a fresh conversation                           |
 | `/stop`    | Interrupt Claude and drop queued messages            |
 | `/tools`   | Tool activity: hidden, calls, or calls with output   |
@@ -85,8 +86,10 @@ process, queue, directory, mode and model. Use either:
 - **A forum group**: create a group, enable Topics, add the bot as an admin
   (so it sees all messages).
 
-A topic named like a subdirectory of the workdir starts working there; otherwise
-pick one with `/cwd`. Writes are confined to the conversation's directory. Idle
+Each topic works in one first-level folder of the workdir. A topic named like a
+folder starts there; otherwise the bot lists the folders and holds your messages
+until you pick one. `/cwd` changes it later (and starts a new conversation).
+Writes are confined to the topic's folder. Idle
 conversations stop their Claude process after 30 minutes and resume on the next
 message.
 
