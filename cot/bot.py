@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, permissions, uploads, usage
+from . import __version__, history, permissions, uploads, usage
 from .config import Config
 from .output import TelegramOutput
 from .session import Session
@@ -41,6 +41,8 @@ TOOL_LEVELS = {
 COMMANDS = [
     ("help", "list commands"),
     ("new", "start a fresh conversation"),
+    ("list", "recent conversations in this folder"),
+    ("resume", "go back to a past conversation"),
     ("stop", "interrupt Claude and drop queued messages"),
     ("cwd", "directory this conversation works in"),
     ("tools", "how much tool activity to show"),
@@ -85,6 +87,7 @@ class Bot:
             MessageHandler(allowed & filters.StatusUpdate.FORUM_TOPIC_CREATED, self._on_topic_created)
         )
         self.app.add_handler(CommandHandler("new", self._cmd_new, filters=allowed))
+        self.app.add_handler(CommandHandler(["list", "resume"], self._cmd_resume, filters=allowed))
         self.app.add_handler(CommandHandler("tools", self._cmd_tools, filters=allowed))
         self.app.add_handler(CommandHandler("mode", self._cmd_mode, filters=allowed))
         self.app.add_handler(CommandHandler("stop", self._cmd_stop, filters=allowed))
@@ -322,6 +325,55 @@ class Bot:
         self.store.put(key, state)
         await self._output(key).notice(f"🆕 New conversation in {state.cwd}")
 
+    async def _cmd_resume(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/list shows past conversations of this folder; /resume <n|id> switches to one."""
+        key = self._key(update)
+        if not await self._ready(key):
+            return
+        state = self._state(key)
+        sessions = await history.recent(state.cwd)
+        if ctx.args:
+            found = history.find(sessions, ctx.args[0])
+            if found:
+                await self._resume(key, found.session_id)
+            else:
+                await self._output(key).notice(f"⚠️ No conversation {ctx.args[0]} here; /list shows them.")
+            return
+        if not sessions:
+            await self._output(key).notice(f"No past conversations in {self._where(key)}.")
+            return
+        buttons = [
+            InlineKeyboardButton(str(i), callback_data=f"resume:{s.session_id}") for i, s in enumerate(sessions, 1)
+        ]
+        rows = [buttons[i : i + 5] for i in range(0, len(buttons), 5)]
+        await self._output(key).send_html(
+            history.render(sessions, state.session_id, self._where(key)), reply_markup=InlineKeyboardMarkup(rows)
+        )
+
+    async def _resume(self, key: Key, session_id: str) -> None:
+        out = self._output(key)
+        state = self._state(key)
+        if session_id == state.session_id:
+            await out.notice("Already in that conversation.")
+            return
+        if any(s.state.session_id == session_id for k, s in self.sessions.items() if k != key):
+            await out.notice("⚠️ That conversation is open in another topic; /new there first.")
+            return
+        info = next((s for s in await history.recent(state.cwd) if s.session_id == session_id), None)
+        if info is None:
+            await out.notice("⚠️ That conversation is no longer here.")
+            return
+        sess = self.sessions.pop(key, None)
+        if sess:
+            await sess.close()
+        state.session_id = session_id
+        state.cost_usd = 0.0
+        self.store.put(key, state)
+        await self._output(key).notice(
+            f"⏪ Resumed: {history.title(info)}\n"
+            "Your next message continues it. Don't use it in the terminal at the same time."
+        )
+
     async def _cmd_tools(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
         if not await self._ready(key):
@@ -475,8 +527,12 @@ class Bot:
             await query.answer()
             await query.edit_message_reply_markup(None)
             await self._set_cwd(key, rest)
-        elif kind in ("tools", "model", "mode") and not await self._ready(key):
+        elif kind in ("tools", "model", "mode", "resume") and not await self._ready(key):
             await query.answer()
+        elif kind == "resume":
+            await query.answer()
+            await query.edit_message_reply_markup(None)
+            await self._resume(key, rest)
         elif kind == "tools":
             await query.answer()
             await query.edit_message_reply_markup(None)

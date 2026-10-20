@@ -15,6 +15,7 @@ and only the Telegram users you allow can talk to it.
 
 - Full Claude Code sessions (same tools, permissions, `CLAUDE.md`, skills and
   MCP servers as in the terminal), resumed across restarts.
+- Pick up past conversations, including ones started in the terminal (`/list`, `/resume`).
 - Live, compact view of tool calls, todo lists, plans and thinking.
 - Permission requests as ✅ Allow / ❌ Deny / ♾️ Always buttons.
 - Several conversations at once, one per Telegram topic, each in its own project folder.
@@ -174,6 +175,8 @@ response stream and costs no tokens.
 | `/help`    | List commands                                        |
 | `/cwd`     | Folder of this topic (a first-level folder)          |
 | `/new`     | Start a fresh conversation                           |
+| `/list`    | Recent conversations in this folder, to resume       |
+| `/resume`  | `/resume <number or id>`: go back to one of them     |
 | `/stop`    | Interrupt Claude and drop queued messages            |
 | `/tools`   | Tool activity: hidden, calls, or calls with output   |
 | `/mode`    | Permission mode (default, acceptEdits, plan, auto…)  |
@@ -215,6 +218,15 @@ confined to the topic's folder.
 
 Idle conversations stop their Claude process after 30 minutes and resume on the
 next message. Conversations survive restarts (`state/sessions.json`).
+
+### Past conversations
+
+`/list` shows the last 10 conversations of the chat's folder, the same ones
+`claude -r` offers there, whether they were started from Telegram or from the
+terminal. Tap a number (or send `/resume 3`, or `/resume <id prefix>`) to switch
+to it with its full context; `/new` starts a fresh one. Don't keep the same
+conversation open in the terminal and in Telegram at once: both would append to
+the same transcript.
 
 ## Confinement
 
