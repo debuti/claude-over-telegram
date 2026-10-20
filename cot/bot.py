@@ -17,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, permissions, uploads
+from . import __version__, permissions, uploads, usage
 from .config import Config
 from .output import TelegramOutput
 from .session import Session
@@ -49,6 +49,7 @@ COMMANDS = [
     ("model", "switch model"),
     ("status", "what's going on"),
     ("cost", "estimated cost of this conversation"),
+    ("usage", "plan usage limits (5-hour and weekly)"),
 ]
 
 MODELS = {
@@ -91,6 +92,7 @@ class Bot:
         self.app.add_handler(CommandHandler("model", self._cmd_model, filters=allowed))
         self.app.add_handler(CommandHandler("status", self._cmd_status, filters=allowed))
         self.app.add_handler(CommandHandler("cost", self._cmd_cost, filters=allowed))
+        self.app.add_handler(CommandHandler("usage", self._cmd_usage, filters=allowed))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         # Unknown /commands fall through to here and reach Claude (e.g. /compact).
         self.app.add_handler(MessageHandler(allowed & filters.TEXT, self._on_text))
@@ -423,12 +425,12 @@ class Bot:
             f"tools: {state.tools}",
         ]
         try:
-            usage = await sess.context_usage() if sess else None
+            context = await sess.context_usage() if sess else None
         except Exception:
             log.exception("context usage failed")
-            usage = None
-        if usage:
-            lines.append(f"context: {usage['percentage']:.0f}% ({usage['totalTokens'] // 1000}k / {usage['maxTokens'] // 1000}k tokens)")
+            context = None
+        if context:
+            lines.append(f"context: {context['percentage']:.0f}% ({context['totalTokens'] // 1000}k / {context['maxTokens'] // 1000}k tokens)")
         await self._output(key).notice("\n".join(lines))
 
     async def _cmd_cost(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -440,6 +442,17 @@ class Bot:
             f"💰 This conversation: ${state.cost_usd:.4f}{last}\n"
             "API-price estimate; on a Claude subscription it counts against your plan limits instead."
         )
+
+    async def _cmd_usage(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        out = self._output(self._key(update))
+        try:
+            text = usage.render(await usage.fetch())
+        except usage.Unavailable as e:
+            text = f"⚠️ Usage not available: {e}"
+        except Exception as e:
+            log.exception("usage failed")
+            text = f"⚠️ Could not fetch usage: {e}"
+        await out.notice(text)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
