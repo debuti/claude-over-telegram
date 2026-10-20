@@ -13,7 +13,7 @@ and only the Telegram users you allow can talk to it.
 
 - Full Claude Code sessions (same tools, permissions, `CLAUDE.md`, skills and
   MCP servers as in the terminal), resumed across restarts.
-- Live, compact view of tool calls, todo lists and plans.
+- Live, compact view of tool calls, todo lists, plans and thinking.
 - Permission requests as ✅ Allow / ❌ Deny / ♾️ Always buttons.
 - Several conversations at once, one per Telegram topic, each in its own project folder.
 - Send photos and files to Claude; Claude can send files back.
@@ -163,7 +163,9 @@ systemctl --user daemon-reload
 
 Write to the bot as you would in the terminal. Messages sent while Claude is
 working are queued. Tool calls show up as a compact, live-updated list
-(`/tools hidden` to see only Claude's replies).
+(`/tools hidden` to see only Claude's replies). When Claude thinks for more than
+a few seconds, a 💭 line shows it (and later for how long); this comes from the
+response stream and costs no tokens.
 
 | Command    | What it does                                         |
 |------------|------------------------------------------------------|

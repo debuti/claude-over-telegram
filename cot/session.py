@@ -14,6 +14,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    StreamEvent,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -74,6 +75,8 @@ class Session:
             permission_mode=self.state.mode or self._default_mode,
             model=self.state.model,
             disallowed_tools=["AskUserQuestion"],
+            # Stream events tell when thinking starts, so the chat can show it live.
+            include_partial_messages=True,
             mcp_servers={tg_tools.SERVER: tg_tools.make_server(self.out, Path(self.state.cwd))},
             allowed_tools=[tg_tools.SEND_FILE],
             system_prompt={"type": "preset", "preset": "claude_code", "append": APPEND_PROMPT},
@@ -201,7 +204,10 @@ class Session:
         assert self._client
         await self._client.query(text)
         async for msg in self._client.receive_response():
-            if isinstance(msg, AssistantMessage):
+            if isinstance(msg, StreamEvent):
+                if msg.parent_tool_use_id is None:
+                    await self._stream_event(msg.event)
+            elif isinstance(msg, AssistantMessage):
                 nested = msg.parent_tool_use_id is not None
                 if not nested and msg.model and not msg.model.startswith("<"):
                     self.model = msg.model
@@ -228,3 +234,10 @@ class Session:
                 elif msg.is_error:
                     detail = "; ".join(msg.errors or []) or msg.subtype
                     await self.out.notice(f"⚠️ Claude ended with an error: {detail}")
+
+    async def _stream_event(self, event: dict) -> None:
+        kind = event.get("type")
+        if kind == "content_block_start" and event.get("content_block", {}).get("type") == "thinking":
+            await self.out.thinking_start()
+        elif kind == "content_block_stop":
+            await self.out.thinking_end()
