@@ -44,7 +44,14 @@ working are queued. Tool calls show up as a compact, live-updated list.
 |------------|------------------------------------------------------|
 | `/new`     | Start a fresh conversation                           |
 | `/verbose` | Show or hide tool results                            |
+| `/mode`    | Permission mode (default, acceptEdits, plan, auto…)  |
 | `/…`       | Anything else is passed to Claude (e.g. `/compact`)  |
+
+When Claude needs permission (the same cases where the terminal would ask), you
+get the request with ✅ Allow / ❌ Deny / ♾️ Always buttons. "Always" saves the
+rule to the project's `.claude/settings.local.json`, like the terminal does.
+Unanswered requests are denied after 15 minutes. In plan mode, the plan arrives
+with Approve / Keep planning buttons.
 
 Conversations survive restarts (they are resumed from `state/sessions.json`).
 

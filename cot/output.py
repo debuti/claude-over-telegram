@@ -48,7 +48,7 @@ class TelegramOutput:
                 await asyncio.sleep(e.retry_after + 0.5)
         return await fn(*args, **kwargs)
 
-    async def send_html(self, text: str) -> int | None:
+    async def send_html(self, text: str, reply_markup=None) -> int | None:
         try:
             msg = await self._call(
                 self.bot.send_message,
@@ -57,12 +57,17 @@ class TelegramOutput:
                 parse_mode=ParseMode.HTML,
                 message_thread_id=self.thread_id,
                 disable_web_page_preview=True,
+                reply_markup=reply_markup,
             )
         except BadRequest as e:
             log.warning("HTML rejected (%s), sending plain text", e)
             try:
                 msg = await self._call(
-                    self.bot.send_message, self.chat_id, html_to_plain(text)[:4096], message_thread_id=self.thread_id
+                    self.bot.send_message,
+                    self.chat_id,
+                    html_to_plain(text)[:4096],
+                    message_thread_id=self.thread_id,
+                    reply_markup=reply_markup,
                 )
             except TelegramError:
                 log.exception("send failed")
@@ -135,6 +140,10 @@ class TelegramOutput:
             await self._flush_activity()
         elif self._flush_task is None:
             self._flush_task = asyncio.create_task(self._delayed_flush(wait))
+
+    async def flush(self) -> None:
+        """Show pending tool calls now and start a new group after them."""
+        await self._close_activity()
 
     async def _close_activity(self) -> None:
         if self._flush_task:

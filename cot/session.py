@@ -22,6 +22,7 @@ from claude_agent_sdk import (
 
 from .jail import make_hook
 from .output import TelegramOutput
+from .permissions import make_can_use_tool
 from .store import ConvState
 
 log = logging.getLogger(__name__)
@@ -55,6 +56,10 @@ class Session:
         self._client: ClaudeSDKClient | None = None
         self._task: asyncio.Task | None = None
         self.busy = False
+        self.waiting = False  # blocked on a permission prompt
+
+    def _set_waiting(self, value: bool) -> None:
+        self.waiting = value
 
     def _options(self) -> ClaudeAgentOptions:
         return ClaudeAgentOptions(
@@ -65,6 +70,7 @@ class Session:
             disallowed_tools=["AskUserQuestion"],
             system_prompt={"type": "preset", "preset": "claude_code", "append": APPEND_PROMPT},
             cli_path=self._cli_path,
+            can_use_tool=make_can_use_tool(self.out, Path(self.state.cwd), self._set_waiting),
             hooks={"PreToolUse": [make_hook(Path(self.state.cwd))]},
             # Bash writes confined to cwd; needs working unprivileged bubblewrap on Linux.
             sandbox={"enabled": True, "allowUnsandboxedCommands": False, "autoAllowBashIfSandboxed": False}
@@ -97,6 +103,12 @@ class Session:
     def pending(self) -> bool:
         """True while a turn runs or messages wait in the queue."""
         return self.busy or not self._queue.empty()
+
+    async def set_mode(self, mode: str) -> None:
+        self.state.mode = mode
+        self._on_state(self.state)
+        if self._client:
+            await self._client.set_permission_mode(mode)
 
     async def close(self) -> None:
         if self._task:
