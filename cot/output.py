@@ -33,7 +33,7 @@ class TelegramOutput:
         self.chat_id = chat_id
         self.thread_id = thread_id
         self.cwd = cwd
-        self.tools = "calls"  # hidden | calls | full
+        self.tools = "hidden"  # hidden | calls | full
         self._activity_id: int | None = None
         self._activity: list[str] = []
         self._shown = ""

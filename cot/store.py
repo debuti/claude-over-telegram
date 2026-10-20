@@ -17,7 +17,7 @@ class ConvState:
     session_id: str | None = None
     mode: str | None = None
     model: str | None = None
-    tools: str = "calls"  # hidden | calls | full (calls plus their results)
+    tools: str = "hidden"  # hidden | calls | full (calls plus their results)
     cost_usd: float = 0.0  # estimated, accumulated over the whole conversation
 
 

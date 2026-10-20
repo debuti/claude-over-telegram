@@ -44,7 +44,7 @@ def load(workdir: Path) -> Config:
         telegram_token=token,
         allowed_user_ids=ids,
         workdir=workdir.expanduser().resolve(),
-        permission_mode=os.environ.get("PERMISSION_MODE") or "default",
+        permission_mode=os.environ.get("PERMISSION_MODE") or "auto",
         state_dir=state_dir,
         cli_path=os.environ.get("CLAUDE_CLI_PATH") or None,
         sandbox_bash=os.environ.get("SANDBOX_BASH", "").lower() in ("1", "true", "yes"),

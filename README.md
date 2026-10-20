@@ -96,7 +96,7 @@ All settings live in `.env` next to the code (see `.env.example`):
 |--------------------|------------|-----------------------------------------------------------------|
 | `TELEGRAM_TOKEN`   | (required) | Bot token from @BotFather                                       |
 | `ALLOWED_USER_IDS` | (empty)    | Comma-separated Telegram user ids allowed to use the bot        |
-| `PERMISSION_MODE`  | `default`  | Initial permission mode: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
+| `PERMISSION_MODE`  | `auto`     | Initial permission mode: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
 | `SANDBOX_BASH`     | `false`    | Confine Bash writes to the workdir too (see [Confinement](#confinement)) |
 | `CLAUDE_CLI_PATH`  | (bundled)  | Use this `claude` binary instead of the one bundled with the SDK |
 | `STATE_DIR`        | `./state`  | Where sessions, lock, pid and log files live                    |
@@ -165,8 +165,8 @@ systemctl --user daemon-reload
 ## Using it
 
 Write to the bot as you would in the terminal. Messages sent while Claude is
-working are queued. Tool calls show up as a compact, live-updated list
-(`/tools hidden` to see only Claude's replies). Whatever the `/tools` level, when Claude thinks for more than
+working are queued. By default you only see Claude's replies; `/tools calls`
+shows tool calls as a compact, live-updated list. Whatever the `/tools` level, when Claude thinks for more than
 a few seconds, a 💭 line shows it (and later for how long); this comes from the
 response stream and costs no tokens.
 
