@@ -108,11 +108,11 @@ class TelegramOutput:
         """Send a local file; images small enough are shown as photos."""
         await self._close_activity()
         kwargs = dict(caption=caption[:1024] or None, message_thread_id=self.thread_id)
-        with path.open("rb") as f:
-            if path.suffix.lower() in PHOTO_EXTS and path.stat().st_size <= PHOTO_MAX:
-                await self._call(self.bot.send_photo, self.chat_id, photo=f, **kwargs)
-            else:
-                await self._call(self.bot.send_document, self.chat_id, document=f, filename=path.name, **kwargs)
+        data = path.read_bytes()  # bytes, not a file object, so a retry resends it whole
+        if path.suffix.lower() in PHOTO_EXTS and len(data) <= PHOTO_MAX:
+            await self._call(self.bot.send_photo, self.chat_id, photo=data, **kwargs)
+        else:
+            await self._call(self.bot.send_document, self.chat_id, document=data, filename=path.name, **kwargs)
 
     # --- activity message ---------------------------------------------------
 
