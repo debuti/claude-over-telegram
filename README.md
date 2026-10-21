@@ -184,6 +184,7 @@ response stream and costs no tokens.
 | `/status`  | Workdir, mode, model, activity, context usage        |
 | `/cost`    | Estimated cost of the conversation                   |
 | `/usage`   | Plan usage: 5-hour and weekly limits                 |
+| `/server`  | Machine health: load, CPU, memory, disk, busiest processes |
 | `/…`       | Anything else is passed to Claude (e.g. `/compact`)  |
 
 When Claude needs permission (the same cases where the terminal would ask), you

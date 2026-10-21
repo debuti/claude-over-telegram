@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, history, permissions, uploads, usage
+from . import __version__, history, permissions, server, uploads, usage
 from .config import Config
 from .output import TelegramOutput
 from .session import Session
@@ -51,6 +51,7 @@ COMMANDS = [
     ("status", "what's going on"),
     ("cost", "estimated cost of this conversation"),
     ("usage", "plan usage limits (5-hour and weekly)"),
+    ("server", "load of the machine the bot runs on"),
 ]
 
 MODELS = {
@@ -95,6 +96,7 @@ class Bot:
         self.app.add_handler(CommandHandler("status", self._cmd_status, filters=allowed))
         self.app.add_handler(CommandHandler("cost", self._cmd_cost, filters=allowed))
         self.app.add_handler(CommandHandler("usage", self._cmd_usage, filters=allowed))
+        self.app.add_handler(CommandHandler("server", self._cmd_server, filters=allowed))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         # Unknown /commands fall through to here and reach Claude (e.g. /compact).
         self.app.add_handler(MessageHandler(allowed & filters.TEXT, self._on_text))
@@ -509,6 +511,17 @@ class Bot:
             log.exception("usage failed")
             text = f"⚠️ Could not fetch usage: {e}"
         await out.notice(text)
+
+    async def _cmd_server(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        key = self._key(update)
+        try:
+            text = await server.render([Path("/"), self.cfg.workdir, Path(self._state(key).cwd)])
+        except server.Unavailable as e:
+            text = f"⚠️ Server status not available: {e}"
+        except Exception as e:
+            log.exception("server status failed")
+            text = f"⚠️ Could not read server status: {e}"
+        await self._output(key).notice(text)
 
     async def _on_button(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
