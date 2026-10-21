@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -49,6 +49,18 @@ def _until(iso: str | None) -> str:
     return f"resets in {left}"
 
 
+def _pace(percent: float, iso: str | None) -> str:
+    """How far usage is ahead of (over) or behind (under) an even spread across the week."""
+    if not iso:
+        return ""
+    left = datetime.fromisoformat(iso.replace("Z", "+00:00")) - datetime.now(timezone.utc)
+    elapsed = 1 - min(max(left / timedelta(days=7), 0), 1)
+    diff = percent - elapsed * 100
+    if abs(diff) < 1:
+        return "\n⚖️ on pace"
+    return f"\n{'🔥' if diff > 0 else '🧊'} {abs(diff):.0f}% {'over' if diff > 0 else 'under'} pace ({elapsed * 100:.0f}% of the week gone)"
+
+
 async def fetch() -> dict:
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(
@@ -66,7 +78,8 @@ def render(data: dict) -> str:
     for lim in data.get("limits") or []:
         label = LABELS.get(lim["kind"], lim["kind"].replace("_", " ").capitalize())
         pct = lim.get("percent") or 0
-        lines.append(f"{label}\n{_bar(pct)} {pct:.0f}%  {_until(lim.get('resets_at'))}")
+        pace = _pace(pct, lim.get("resets_at")) if lim.get("group") == "weekly" else ""
+        lines.append(f"{label}\n{_bar(pct)} {pct:.0f}%  {_until(lim.get('resets_at'))}{pace}")
     extra = data.get("extra_usage") or {}
     if extra.get("is_enabled") and extra.get("utilization") is not None:
         lines.append(f"Extra usage: {extra['utilization']:.0f}% of the monthly limit")
