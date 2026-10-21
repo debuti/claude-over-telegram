@@ -36,29 +36,37 @@ def _bar(percent: float, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def _until(iso: str | None) -> str:
-    if not iso:
-        return ""
-    secs = int((datetime.fromisoformat(iso.replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds())
-    if secs <= 0:
-        return "resets now"
+def _duration(secs: float) -> str:
+    secs = int(secs)
     days, rest = divmod(secs, 86400)
     hours, rest = divmod(rest, 3600)
     mins = rest // 60
-    left = f"{days}d {hours}h" if days else f"{hours}h {mins}m" if hours else f"{mins}m"
-    return f"resets in {left}"
+    return f"{days}d {hours}h" if days else f"{hours}h {mins}m" if hours else f"{mins}m"
+
+
+def _until(iso: str | None) -> str:
+    if not iso:
+        return ""
+    secs = (datetime.fromisoformat(iso.replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds()
+    return f"resets in {_duration(secs)}" if secs > 0 else "resets now"
 
 
 def _pace(percent: float, iso: str | None) -> str:
-    """How far usage is ahead of (over) or behind (under) an even spread across the week."""
+    """Whether the weekly limit lasts until the reset if usage keeps its average rate so far."""
     if not iso:
         return ""
-    left = datetime.fromisoformat(iso.replace("Z", "+00:00")) - datetime.now(timezone.utc)
-    elapsed = 1 - min(max(left / timedelta(days=7), 0), 1)
-    diff = percent - elapsed * 100
-    if abs(diff) < 1:
-        return "\n⚖️ on pace"
-    return f"\n{'🔥' if diff > 0 else '🧊'} {abs(diff):.0f}% {'over' if diff > 0 else 'under'} pace ({elapsed * 100:.0f}% of the week gone)"
+    week = timedelta(days=7).total_seconds()
+    left = (datetime.fromisoformat(iso.replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds()
+    left = min(max(left, 0), week)
+    elapsed = week - left
+    if percent >= 100 or not percent or not elapsed:
+        return ""
+    lasts = (100 - percent) / (percent / elapsed)  # seconds until 100% at the current rate
+    diff = left - lasts
+    if abs(diff) < 3600:
+        return "\n⚖️ at the current rate, runs out right at reset"
+    when = "before" if diff > 0 else "after"
+    return f"\n{'🔥' if diff > 0 else '🧊'} at the current rate, runs out ~{_duration(abs(diff))} {when} reset"
 
 
 async def fetch() -> dict:
