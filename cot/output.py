@@ -14,7 +14,7 @@ from typing import Any
 
 from telegram import Bot
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, RetryAfter, TelegramError
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 
 from .render import TG_LIMIT, esc, html_to_plain, markdown_to_html, tool_line, tool_result_text
 
@@ -47,11 +47,18 @@ class TelegramOutput:
     # --- low level --------------------------------------------------------
 
     async def _call(self, fn, *args, **kwargs):
-        for _ in range(3):
+        # Network errors and timeouts are retried too: when the machine or the link is
+        # overloaded a reply is better sent twice than lost.
+        for attempt in range(4):
             try:
                 return await fn(*args, **kwargs)
             except RetryAfter as e:
                 await asyncio.sleep(e.retry_after + 0.5)
+            except BadRequest:
+                raise
+            except NetworkError as e:
+                log.warning("Telegram %s failed (%s), retrying", fn.__name__, e)
+                await asyncio.sleep(2**attempt)
         return await fn(*args, **kwargs)
 
     async def send_html(self, text: str, reply_markup=None) -> int | None:

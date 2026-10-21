@@ -76,6 +76,10 @@ class Bot:
             .token(cfg.telegram_token)
             .concurrent_updates(True)
             .connect_timeout(20)
+            # The 5 s defaults time out when the machine is overloaded.
+            .read_timeout(30)
+            .write_timeout(30)
+            .media_write_timeout(120)
             .get_updates_connect_timeout(20)
             .post_init(self._post_init)
             .post_shutdown(self._shutdown)
