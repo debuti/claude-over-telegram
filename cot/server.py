@@ -39,7 +39,7 @@ async def _sample(top: int = 5) -> tuple[dict[str, float], list[str]]:
     d = [y - x for x, y in zip(a, b)]
     total = sum(d) or 1
     user, nice, system, idle, iowait, irq, softirq, steal = (100 * x / total for x in d)
-    cpu = {"busy": user + nice + system + irq + softirq, "iowait": iowait, "steal": steal}
+    cpu = {"busy": user + nice + system + irq + softirq, "iowait": iowait, "steal": steal, "idle": idle}
 
     # Ticks per process against ticks of one core over the same interval, as top shows it.
     one_core = total / (os.cpu_count() or 1)
@@ -69,10 +69,10 @@ def _uptime() -> str:
     return f"{days}d {rest // 3600}h" if days else f"{rest // 3600}h {rest % 3600 // 60}m"
 
 
-def _verdict(load: float, cores: int, mem_avail: float, disk_free: float) -> str:
-    if load > 2 * cores or mem_avail < 0.05 or disk_free < 0.02:
+def _verdict(cpu: float, mem_avail: float, disk_free: float) -> str:
+    if cpu >= 90 or mem_avail < 0.05 or disk_free < 0.02:
         return "🔴 overloaded"
-    if load > cores or mem_avail < 0.15 or disk_free < 0.10:
+    if cpu >= 70 or mem_avail < 0.15 or disk_free < 0.10:
         return "🟡 busy"
     return "🟢 fine"
 
@@ -98,7 +98,8 @@ async def render(paths: list[Path]) -> str:
         disks.append(f"disk {p}: {du.used / du.total * 100:.0f}% used, {_gb(du.free)} free")
 
     lines = [
-        f"🖥 Server: {_verdict(load1, cores, avail / total, worst)}",
+        # Judged on the CPU right now: the load average lags by minutes.
+        f"🖥 Server: {_verdict(100 - cpu['idle'], avail / total, worst)}",
         f"load: {load1:.1f} / {load5:.1f} / {load15:.1f} on {cores} cores",
         f"cpu: {cpu['busy']:.0f}% busy, {cpu['iowait']:.0f}% io wait"
         + (f", {cpu['steal']:.0f}% stolen by the host" if cpu["steal"] >= 1 else ""),
