@@ -188,6 +188,17 @@ class Session:
             except asyncio.CancelledError:
                 pass
         await self._disconnect()
+        if self._in_docker:
+            await asyncio.to_thread(container.stop_claude, self._container_name())
+
+    @property
+    def _in_docker(self) -> bool:
+        return "COT_IMAGE" in self._cli_env
+
+    def _alive(self) -> bool:
+        """False once the CLI process is gone (killed, crashed): the client can't be reused."""
+        process = getattr(getattr(self._client, "_transport", None), "_process", None)
+        return process is None or process.returncode is None
 
     async def _disconnect(self) -> None:
         if self._client:
@@ -203,7 +214,7 @@ class Session:
                 text = await asyncio.wait_for(self._queue.get(), IDLE_DISCONNECT)
             except asyncio.TimeoutError:
                 await self._disconnect()
-                if "COT_IMAGE" in self._cli_env:
+                if self._in_docker:
                     await asyncio.to_thread(container.reap, self._container_name())
                 continue
             text = await self._gather(text)
@@ -211,6 +222,9 @@ class Session:
                 continue
             self.busy = True
             try:
+                if self._client is not None and not self._alive():
+                    log.warning("Claude exited between turns; reconnecting")
+                    await self._disconnect()
                 if self._client is None:
                     await self._connect()
                 await self._turn(text)
