@@ -168,8 +168,10 @@ systemctl --user daemon-reload
 
 ## Using it
 
-Write to the bot as you would in the terminal. Messages sent while Claude is
-working are queued. By default you only see Claude's replies; `/tools calls`
+Write to the bot as you would in the terminal. Messages sent a few seconds
+apart reach Claude together, as one, so a long text Telegram splits in pieces
+isn't answered piece by piece; those sent while Claude is working are queued
+and merged the same way. By default you only see Claude's replies; `/tools calls`
 shows tool calls as a compact, live-updated list. Whatever the `/tools` level, when Claude thinks for more than
 a few seconds, a 💭 line shows it (and later for how long); this comes from the
 response stream and costs no tokens.

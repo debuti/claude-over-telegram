@@ -34,6 +34,9 @@ APPEND_PROMPT = (
     "To give the user a file, send it with the send_file tool."
 )
 IDLE_DISCONNECT = 30 * 60  # stop the idle Claude process; the next message resumes it
+# Telegram splits long texts into several messages: wait this long after the last one
+# so they reach Claude as a single turn. Messages queued during a turn merge too.
+GATHER_SECONDS = 3.0
 
 OnState = Callable[[ConvState], None]
 
@@ -58,6 +61,7 @@ class Session:
         self._cli_path = cli_path
         self._cli_env = cli_env
         self._queue: asyncio.Queue[str] = asyncio.Queue()
+        self._gathered: list[str] = []  # taken from the queue, waiting for the rest
         self._client: ClaudeSDKClient | None = None
         self._task: asyncio.Task | None = None
         self.busy = False
@@ -119,18 +123,19 @@ class Session:
     @property
     def pending(self) -> bool:
         """True while a turn runs or messages wait in the queue."""
-        return self.busy or not self._queue.empty()
+        return self.busy or bool(self._gathered) or not self._queue.empty()
 
     @property
     def queued(self) -> int:
-        return self._queue.qsize()
+        return self._queue.qsize() + len(self._gathered)
 
     async def stop(self) -> tuple[bool, int]:
         """Interrupt the running turn and drop queued messages.
 
         Returns (a turn was running, number of queued messages dropped).
         """
-        dropped = 0
+        dropped = len(self._gathered)
+        self._gathered.clear()
         while not self._queue.empty():
             self._queue.get_nowait()
             dropped += 1
@@ -188,6 +193,9 @@ class Session:
             except asyncio.TimeoutError:
                 await self._disconnect()
                 continue
+            text = await self._gather(text)
+            if not text:  # dropped by /stop while gathering
+                continue
             self.busy = True
             try:
                 if self._client is None:
@@ -204,6 +212,18 @@ class Session:
                 await self.out.end_turn()
                 self.busy = False
                 self._stopping = False
+
+    async def _gather(self, first: str) -> str:
+        """The first message plus everything that follows it in quick succession."""
+        self._gathered = [first]
+        while True:
+            try:
+                text = await asyncio.wait_for(self._queue.get(), GATHER_SECONDS)
+            except asyncio.TimeoutError:
+                break
+            self._gathered.append(text)  # after a /stop this starts afresh
+        text, self._gathered = "\n\n".join(self._gathered), []
+        return text
 
     async def _turn(self, text: str) -> None:
         assert self._client
