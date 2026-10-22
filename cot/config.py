@@ -19,6 +19,9 @@ class Config:
     state_dir: Path
     cli_path: str | None
     sandbox_bash: bool
+    docker: bool
+    docker_cpus: str
+    docker_memory: str
 
 
 def load(workdir: Path) -> Config:
@@ -48,4 +51,7 @@ def load(workdir: Path) -> Config:
         state_dir=state_dir,
         cli_path=os.environ.get("CLAUDE_CLI_PATH") or None,
         sandbox_bash=os.environ.get("SANDBOX_BASH", "").lower() in ("1", "true", "yes"),
+        docker=os.environ.get("SANDBOX_DOCKER", "true").lower() in ("1", "true", "yes"),
+        docker_cpus=os.environ.get("DOCKER_CPUS") or "2",
+        docker_memory=os.environ.get("DOCKER_MEMORY") or "4g",
     )

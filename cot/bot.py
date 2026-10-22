@@ -63,8 +63,10 @@ MODELS = {
 
 
 class Bot:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, cli_path: str | None, cli_env: dict[str, str]):
         self.cfg = cfg
+        self.cli_path = cli_path
+        self.cli_env = cli_env
         self.store = Store(cfg.state_dir / "sessions.json")
         self.sessions: dict[Key, Session] = {}
         self.typing: dict[Key, asyncio.Task] = {}
@@ -174,8 +176,9 @@ class Bot:
             out=out,
             on_state=lambda st: self.store.put(key, st),
             default_mode=self.cfg.permission_mode,
-            cli_path=self.cfg.cli_path,
-            sandbox_bash=self.cfg.sandbox_bash,
+            cli_path=self.cli_path,
+            cli_env=self.cli_env,
+            sandbox_bash=self.cfg.sandbox_bash and not self.cfg.docker,
         )
         sess.start()
         self.sessions[key] = sess

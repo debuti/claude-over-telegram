@@ -47,6 +47,7 @@ class Session:
         on_state: OnState,
         default_mode: str,
         cli_path: str | None,
+        cli_env: dict[str, str],
         sandbox_bash: bool,
     ):
         self.state = state
@@ -55,6 +56,7 @@ class Session:
         self._on_state = on_state
         self._default_mode = default_mode
         self._cli_path = cli_path
+        self._cli_env = cli_env
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._client: ClaudeSDKClient | None = None
         self._task: asyncio.Task | None = None
@@ -83,6 +85,7 @@ class Session:
             allowed_tools=[tg_tools.SEND_FILE],
             system_prompt={"type": "preset", "preset": "claude_code", "append": APPEND_PROMPT},
             cli_path=self._cli_path,
+            env=self._cli_env,
             can_use_tool=permissions.make_can_use_tool(self.out, Path(self.state.cwd), self._set_waiting),
             hooks={"PreToolUse": [make_hook(Path(self.state.cwd))]},
             # Bash writes confined to cwd; needs working unprivileged bubblewrap on Linux.

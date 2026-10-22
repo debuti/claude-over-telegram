@@ -30,6 +30,7 @@ and only the Telegram users you allow can talk to it.
 - A Claude subscription (Pro/Max) or an Anthropic API key. The Claude Code CLI
   comes bundled with the SDK, but you need to log in once (see below).
 - A Telegram account.
+- Docker, usable by the user the bot runs as (or set `SANDBOX_DOCKER=false`).
 
 ## Installation
 
@@ -97,7 +98,10 @@ All settings live in `.env` next to the code (see `.env.example`):
 | `TELEGRAM_TOKEN`   | (required) | Bot token from @BotFather                                       |
 | `ALLOWED_USER_IDS` | (empty)    | Comma-separated Telegram user ids allowed to use the bot        |
 | `PERMISSION_MODE`  | `auto`     | Initial permission mode: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
-| `SANDBOX_BASH`     | `false`    | Confine Bash writes to the workdir too (see [Confinement](#confinement)) |
+| `SANDBOX_DOCKER`   | `true`     | Run each conversation's Claude in its own container (see [Confinement](#confinement)) |
+| `DOCKER_CPUS`      | `2`        | CPUs each container may use                                     |
+| `DOCKER_MEMORY`    | `4g`       | Memory each container may use                                   |
+| `SANDBOX_BASH`     | `false`    | Without Docker: confine Bash writes to the workdir too          |
 | `CLAUDE_CLI_PATH`  | (bundled)  | Use this `claude` binary instead of the one bundled with the SDK |
 | `STATE_DIR`        | `./state`  | Where sessions, lock, pid and log files live                    |
 
@@ -231,7 +235,27 @@ the same transcript.
 
 ## Confinement
 
-Claude can read anywhere but write only inside the workdir (or the topic's
+By default (`SANDBOX_DOCKER=true`) each conversation's Claude runs in its own
+Docker container, together with everything it runs (Bash, builds, tests…). The
+container sees only:
+
+- the conversation's folder (the topic's folder, or the whole workdir), at the
+  same path and with your uid, so files keep their owner;
+- `~/.claude` and `~/.claude.json`, for the login and for `/resume`;
+- `~/.gitconfig`, `~/.ssh` and `~/.config/gh`, read-only, so it can push. This
+  is a hole in the isolation: whatever your SSH key and `gh` can reach, Claude
+  can too.
+
+It is capped at `DOCKER_CPUS` and `DOCKER_MEMORY`, so a runaway test suite can't
+make the machine (and the bot) unresponsive. It shares the host network, so dev
+servers and local services are reachable as usual, but it has no Docker socket:
+it can't start containers of its own. The image (`docker/Dockerfile`) is based
+on Playwright's, with Node, Python, git, gh and browsers; it is built the first
+time the bot starts, and again whenever the Dockerfile changes. Add there
+whatever your projects need. The bot user must be able to run `docker`.
+
+Without Docker (`SANDBOX_DOCKER=false`), Claude runs as your user on the host.
+It can read anywhere but write only inside the workdir (or the topic's
 folder). Its file-writing tools (Write, Edit, NotebookEdit) are denied any path
 outside it, whatever the permission mode. Bash is not covered by that check:
 set `SANDBOX_BASH=true` so Bash commands can only write inside it too.
@@ -269,8 +293,8 @@ Read this before exposing the bot to anyone but yourself.
   replies (code included) are stored on Telegram's servers like any other
   chat. Bot chats are not end-to-end encrypted.
 - **Permission modes still apply.** In `default` mode every risky action asks
-  for your OK; `auto` and `bypassPermissions` don't. With either, turn on
-  `SANDBOX_BASH` (see [Confinement](#confinement)).
+  for your OK; `auto` and `bypassPermissions` don't. With either, keep
+  `SANDBOX_DOCKER` on, or turn on `SANDBOX_BASH` (see [Confinement](#confinement)).
 
 ## Updating
 

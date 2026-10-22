@@ -4,7 +4,7 @@ import logging
 import warnings
 from pathlib import Path
 
-from . import config
+from . import config, container
 from .bot import Bot
 
 
@@ -40,7 +40,8 @@ def main() -> None:
     except BlockingIOError:
         raise SystemExit("another instance is already running") from None
 
-    Bot(cfg).run()
+    cli_path, cli_env = container.prepare(cfg) if cfg.docker else (cfg.cli_path, {})
+    Bot(cfg, cli_path, cli_env).run()
 
 
 if __name__ == "__main__":
