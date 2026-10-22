@@ -36,7 +36,7 @@ async def _sample(top: int = 5) -> tuple[dict[str, float], list[str]]:
     a, pa = _cpu_times(), _proc_times()
     await asyncio.sleep(1)
     b, pb = _cpu_times(), _proc_times()
-    d = [y - x for x, y in zip(a, b)]
+    d = [y - x for x, y in zip(a, b, strict=True)]
     total = sum(d) or 1
     user, nice, system, idle, iowait, irq, softirq, steal = (100 * x / total for x in d)
     cpu = {"busy": user + nice + system + irq + softirq, "iowait": iowait, "steal": steal, "idle": idle}

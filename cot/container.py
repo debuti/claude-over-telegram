@@ -89,7 +89,9 @@ def prepare(cfg: Config) -> tuple[str, dict[str, str]]:
     try:
         _docker("info", capture_output=True)
     except subprocess.CalledProcessError:
-        raise SystemExit("SANDBOX_DOCKER is on but docker is not usable by this user (or set SANDBOX_DOCKER=false)")
+        raise SystemExit(
+            "SANDBOX_DOCKER is on but docker is not usable by this user (or set SANDBOX_DOCKER=false)"
+        ) from None
 
     # Containers whose work is done; those still running something are kept.
     names = _docker("ps", "-a", "--filter", "label=cot.agent=1", "--format", "{{.Names}}", capture_output=True)
