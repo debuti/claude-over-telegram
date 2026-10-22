@@ -6,6 +6,7 @@ Claude one turn at a time and forwards the output through callbacks.
 
 import asyncio
 import logging
+import os
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -44,6 +45,11 @@ IDLE_DISCONNECT = 30 * 60  # stop the idle Claude process; the next message resu
 GATHER_SECONDS = 3.0
 
 OnState = Callable[[ConvState], None]
+
+
+def _transcript_exists(session_id: str) -> bool:
+    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    return any((config_dir / "projects").glob(f"*/{session_id}.jsonl"))
 
 
 class Session:
@@ -114,9 +120,10 @@ class Session:
         try:
             await client.connect()
         except Exception:
-            if not self.state.session_id:
+            # Only a session whose transcript is gone starts afresh: any other failure (the
+            # CLI or its container not starting) must not cost the conversation its history.
+            if not self.state.session_id or _transcript_exists(self.state.session_id):
                 raise
-            # The stored session may be gone (e.g. deleted transcripts): start fresh.
             log.warning("resume of %s failed, starting a new session", self.state.session_id)
             self.state.session_id = None
             self._on_state(self.state)
