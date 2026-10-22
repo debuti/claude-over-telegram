@@ -167,6 +167,12 @@ class Bot:
         rel = Path(cwd).relative_to(self.cfg.workdir)
         return f"{self.cfg.workdir.name}/{rel}" if rel != Path(".") else f"{self.cfg.workdir.name}/"
 
+    def _runner(self, cwd: Path) -> dict:
+        """How the conversation's Claude starts: in its container, or on the host for excluded folders."""
+        if self.cfg.docker and cwd.name not in self.cfg.docker_exclude:
+            return {"cli_path": self.cli_path, "cli_env": self.cli_env, "sandbox_bash": False}
+        return {"cli_path": self.cfg.cli_path, "cli_env": {}, "sandbox_bash": self.cfg.sandbox_bash}
+
     def _session(self, key: Key) -> Session:
         sess = self.sessions.get(key)
         if sess:
@@ -179,9 +185,7 @@ class Bot:
             out=out,
             on_state=lambda st: self.store.put(key, st),
             default_mode=self.cfg.permission_mode,
-            cli_path=self.cli_path,
-            cli_env=self.cli_env,
-            sandbox_bash=self.cfg.sandbox_bash and not self.cfg.docker,
+            **self._runner(Path(state.cwd)),
         )
         sess.start()
         self.sessions[key] = sess

@@ -101,6 +101,7 @@ All settings live in `.env` next to the code (see `.env.example`):
 | `SANDBOX_DOCKER`   | `true`     | Run each conversation's Claude in its own container (see [Confinement](#confinement)) |
 | `DOCKER_CPUS`      | `2`        | CPUs each container may use                                     |
 | `DOCKER_MEMORY`    | `4g`       | Memory each container may use                                   |
+| `DOCKER_EXCLUDE`   | (empty)    | Comma-separated folders whose conversations run on the host, outside Docker |
 | `SANDBOX_BASH`     | `false`    | Without Docker: confine Bash writes to the workdir too          |
 | `CLAUDE_CLI_PATH`  | (bundled)  | Use this `claude` binary instead of the one bundled with the SDK |
 | `STATE_DIR`        | `./state`  | Where sessions, lock, pid and log files live                    |
