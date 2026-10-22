@@ -22,7 +22,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from . import permissions, tg_tools
+from . import container, permissions, tg_tools
 from .jail import make_hook
 from .output import TelegramOutput
 from .store import ConvState
@@ -32,7 +32,11 @@ log = logging.getLogger(__name__)
 APPEND_PROMPT = (
     "The user is talking to you through a Telegram chat, not a terminal. "
     "Never use the AskUserQuestion tool: when you need input, ask in plain text and end your turn. "
-    "To give the user a file, send it with the send_file tool."
+    "To give the user a file, send it with the send_file tool. "
+    "This session's process stops after a while without messages and when the bot restarts, "
+    "and the commands it is running stop with it. Start anything that may take more than a few "
+    "minutes (test suites, builds, servers) detached, e.g. `setsid nohup cmd > job.log 2>&1 &`, "
+    "and follow its log: detached jobs keep running."
 )
 IDLE_DISCONNECT = 30 * 60  # stop the idle Claude process; the next message resumes it
 # Telegram splits long texts into several messages: wait this long after the last one
@@ -199,6 +203,8 @@ class Session:
                 text = await asyncio.wait_for(self._queue.get(), IDLE_DISCONNECT)
             except asyncio.TimeoutError:
                 await self._disconnect()
+                if "COT_IMAGE" in self._cli_env:
+                    await asyncio.to_thread(container.reap, self._container_name())
                 continue
             text = await self._gather(text)
             if not text:  # dropped by /stop while gathering

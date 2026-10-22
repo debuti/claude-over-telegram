@@ -248,6 +248,14 @@ container sees only:
   is a hole in the isolation: whatever your SSH key and `gh` can reach, Claude
   can too.
 
+A conversation's container outlives its Claude: when Claude stops (after 30
+minutes without messages, or when the bot restarts) whatever it started
+detached, like a long test suite or a dev server, keeps running, and the next
+message brings Claude back into the same container. The bot removes containers
+with nothing left running in them, on idle and when it starts. Claude is told to
+start long jobs detached (`setsid nohup … &`), since commands it runs in the
+foreground stop with it.
+
 Containers are named `cot-<topic or folder>-<topic id>`, so `docker ps` shows
 which is which (topics created or renamed before 2.2 show their folder instead).
 Each is capped at `DOCKER_CPUS` and `DOCKER_MEMORY`, so a runaway test suite can't
