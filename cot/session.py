@@ -1,13 +1,16 @@
 """One Claude Code conversation, driven through the Agent SDK.
 
 Incoming user messages go into a queue; a single consumer task feeds them to
-Claude one turn at a time and forwards the output through callbacks.
+Claude one turn at a time. A reader task forwards everything Claude says, also
+the turns it starts on its own (a background job finishing, a Monitor event),
+which would otherwise wait unread and come out as the reply to the next message.
 """
 
 import asyncio
 import logging
 import os
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -81,6 +84,9 @@ class Session:
         self.last_turn_cost: float | None = None
         self._proc_cost = 0.0  # total_cost_usd is cumulative per CLI process
         self._stopping = False
+        self._reader: asyncio.Task | None = None
+        self._turn_done: asyncio.Future | None = None  # the user's turn, until its result
+        self._last_activity = time.monotonic()
 
     def _set_waiting(self, value: bool) -> None:
         self.waiting = value
@@ -131,6 +137,7 @@ class Session:
             await client.connect()
         self._client = client
         self._proc_cost = 0.0
+        self._reader = asyncio.create_task(self._read(client))
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
@@ -208,6 +215,9 @@ class Session:
         return process is None or process.returncode is None
 
     async def _disconnect(self) -> None:
+        if self._reader:
+            self._reader.cancel()
+            self._reader = None
         if self._client:
             try:
                 await self._client.disconnect()
@@ -220,6 +230,9 @@ class Session:
             try:
                 text = await asyncio.wait_for(self._queue.get(), IDLE_DISCONNECT)
             except asyncio.TimeoutError:
+                # Claude may be working on its own (a turn it started) or just have.
+                if self.busy or time.monotonic() - self._last_activity < IDLE_DISCONNECT:
+                    continue
                 await self._disconnect()
                 if self._in_docker:
                     await asyncio.to_thread(container.reap, self._container_name())
@@ -242,8 +255,9 @@ class Session:
                 await self.out.notice(f"⚠️ Error: {e}")
                 # Drop the client so the next message reconnects (resuming the session).
                 await self._disconnect()
-            finally:
                 await self.out.end_turn()
+            finally:
+                self._turn_done = None
                 self.busy = False
                 self._stopping = False
 
@@ -261,38 +275,65 @@ class Session:
 
     async def _turn(self, text: str) -> None:
         assert self._client
+        self._turn_done = asyncio.get_running_loop().create_future()
         await self._client.query(text)
-        async for msg in self._client.receive_response():
-            if isinstance(msg, StreamEvent):
-                if msg.parent_tool_use_id is None:
-                    await self._stream_event(msg.event)
-            elif isinstance(msg, AssistantMessage):
-                nested = msg.parent_tool_use_id is not None
-                if not nested and msg.model and not msg.model.startswith("<"):
-                    self.model = msg.model
-                for block in msg.content:
-                    if isinstance(block, TextBlock) and block.text.strip() and not nested:
-                        await self.out.text(block.text)
-                    elif isinstance(block, ToolUseBlock):
-                        await self.out.tool_use(block.name, block.input, nested)
-            elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
-                for block in msg.content:
-                    if isinstance(block, ToolResultBlock) and not self._stopping:
-                        await self.out.tool_result(block.content, bool(block.is_error))
-            elif isinstance(msg, ResultMessage):
-                if msg.session_id and msg.session_id != self.state.session_id:
-                    self.state.session_id = msg.session_id
-                    self._on_state(self.state)
-                if msg.total_cost_usd is not None:
-                    self.last_turn_cost = max(msg.total_cost_usd - self._proc_cost, 0.0)
-                    self._proc_cost = msg.total_cost_usd
-                    self.state.cost_usd += self.last_turn_cost
-                    self._on_state(self.state)
-                if self._stopping or (msg.terminal_reason or "").startswith("aborted"):
-                    await self.out.notice("🛑 Stopped")
-                elif msg.is_error:
-                    detail = "; ".join(msg.errors or []) or msg.subtype
-                    await self.out.notice(f"⚠️ Claude ended with an error: {detail}")
+        await self._turn_done
+
+    async def _read(self, client: ClaudeSDKClient) -> None:
+        """Forward all of Claude's output for as long as this process lives."""
+        try:
+            async for msg in client.receive_messages():
+                self._last_activity = time.monotonic()
+                if not self.busy:  # a turn Claude started on its own
+                    self.busy = True
+                await self._handle(msg)
+                if isinstance(msg, ResultMessage):
+                    await self.out.end_turn()
+                    if self._turn_done and not self._turn_done.done():
+                        self._turn_done.set_result(None)
+                    elif self._turn_done is None:
+                        self.busy = False
+            raise ConnectionError("Claude stopped")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if self._turn_done and not self._turn_done.done():
+                self._turn_done.set_exception(e)
+            else:
+                log.warning("Claude's output ended between turns: %s", e)
+                self.busy = False
+
+    async def _handle(self, msg) -> None:
+        if isinstance(msg, StreamEvent):
+            if msg.parent_tool_use_id is None:
+                await self._stream_event(msg.event)
+        elif isinstance(msg, AssistantMessage):
+            nested = msg.parent_tool_use_id is not None
+            if not nested and msg.model and not msg.model.startswith("<"):
+                self.model = msg.model
+            for block in msg.content:
+                if isinstance(block, TextBlock) and block.text.strip() and not nested:
+                    await self.out.text(block.text)
+                elif isinstance(block, ToolUseBlock):
+                    await self.out.tool_use(block.name, block.input, nested)
+        elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
+            for block in msg.content:
+                if isinstance(block, ToolResultBlock) and not self._stopping:
+                    await self.out.tool_result(block.content, bool(block.is_error))
+        elif isinstance(msg, ResultMessage):
+            if msg.session_id and msg.session_id != self.state.session_id:
+                self.state.session_id = msg.session_id
+                self._on_state(self.state)
+            if msg.total_cost_usd is not None:
+                self.last_turn_cost = max(msg.total_cost_usd - self._proc_cost, 0.0)
+                self._proc_cost = msg.total_cost_usd
+                self.state.cost_usd += self.last_turn_cost
+                self._on_state(self.state)
+            if self._stopping or (msg.terminal_reason or "").startswith("aborted"):
+                await self.out.notice("🛑 Stopped")
+            elif msg.is_error:
+                detail = "; ".join(msg.errors or []) or msg.subtype
+                await self.out.notice(f"⚠️ Claude ended with an error: {detail}")
 
     async def _stream_event(self, event: dict) -> None:
         kind = event.get("type")

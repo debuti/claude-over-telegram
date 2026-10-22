@@ -261,6 +261,8 @@ foreground stop with it.
 `./containers.sh` lists them with their limits and current use (so does
 `/server`, in the chat). Containers are named `cot-<topic or folder>-<topic id>`, so `docker ps` shows
 which is which (topics created or renamed before 2.2 show their folder instead).
+Claude's commands, and whatever they start, run at a lower CPU priority than
+Claude itself (`nice 10`), so a container busy with tests still answers.
 Each is capped at `DOCKER_CPUS` and `DOCKER_MEMORY`, so a runaway test suite can't
 make the machine (and the bot) unresponsive. It shares the host network, so dev
 servers and local services are reachable as usual, but it has no Docker socket:

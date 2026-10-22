@@ -28,7 +28,8 @@ if [[ "$current" != "true $spec" ]]; then
         --pids-limit 4096 --shm-size 1g
         -e HOME="$HOME"
         -v "$PWD:$PWD"
-        -v "$COT_CLAUDE:/usr/local/bin/claude:ro")
+        -v "$COT_CLAUDE:/usr/local/bin/claude:ro"
+        -v "$(dirname "$0")/nice-shell.sh:/usr/local/bin/cot-shell:ro")
     mkdir -p "$HOME/.claude"
     args+=(-v "$HOME/.claude:$HOME/.claude")
     [[ -f "$HOME/.claude.json" ]] && args+=(-v "$HOME/.claude.json:$HOME/.claude.json")
@@ -48,6 +49,9 @@ docker exec "$COT_NAME" sh -c 'pkill -x claude || exit 0
 
 # Only what Claude needs from the bot's environment: never the Telegram token.
 exec_args=(exec -i -w "$PWD")
+# Commands below Claude in priority (containers from before 2.7 lack the script).
+docker exec "$COT_NAME" test -x /usr/local/bin/cot-shell \
+    && exec_args+=(-e CLAUDE_CODE_SHELL_PREFIX=/usr/local/bin/cot-shell)
 while IFS= read -r name; do
     case "$name" in
         CLAUDE*|ANTHROPIC*|MCP_*|DISABLE_*|MAX_*|BASH_*|OTEL_*|LANG|LC_*|TZ|TERM|*_PROXY|*_proxy)
