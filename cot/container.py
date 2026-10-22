@@ -51,7 +51,10 @@ def _image() -> str:
 
 
 def reap(name: str) -> None:
-    """Remove the container unless something besides Claude still runs in it."""
+    """End Claude in the container, and remove it unless something else still runs there."""
+    # docker exec leaves Claude running when its connection closes; alone, it would go on
+    # acting on finished background jobs with nobody to read it.
+    _docker("exec", name, "pkill", "-x", "claude", capture_output=True, check=False)
     top = _docker("top", name, "-eo", "pid,comm", capture_output=True, check=False)
     if top.returncode == 0:  # not running: nothing to wait for
         busy = [line.split(None, 1)[1] for line in top.stdout.splitlines()[1:] if line.split(None, 1)[1:]]

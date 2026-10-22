@@ -31,6 +31,12 @@ if [[ "$current" != "true $spec" ]]; then
     docker "${args[@]}" "$COT_IMAGE" sleep infinity >/dev/null
 fi
 
+# A Claude from an earlier connection may still run: docker exec doesn't stop it when
+# the bot goes away. Two on the same conversation answer into the void, so end it.
+docker exec "$COT_NAME" sh -c 'pkill -x claude || exit 0
+    for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -x claude >/dev/null || exit 0; sleep 0.5; done
+    pkill -9 -x claude' >/dev/null 2>&1 || true
+
 # Only what Claude needs from the bot's environment: never the Telegram token.
 exec_args=(exec -i -w "$PWD")
 while IFS= read -r name; do
