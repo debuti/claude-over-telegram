@@ -258,7 +258,8 @@ with nothing left running in them, on idle and when it starts. Claude is told to
 start long jobs detached (`setsid nohup … &`), since commands it runs in the
 foreground stop with it.
 
-Containers are named `cot-<topic or folder>-<topic id>`, so `docker ps` shows
+`./containers.sh` lists them with their limits and current use (so does
+`/server`, in the chat). Containers are named `cot-<topic or folder>-<topic id>`, so `docker ps` shows
 which is which (topics created or renamed before 2.2 show their folder instead).
 Each is capped at `DOCKER_CPUS` and `DOCKER_MEMORY`, so a runaway test suite can't
 make the machine (and the bot) unresponsive. It shares the host network, so dev

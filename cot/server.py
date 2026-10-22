@@ -77,12 +77,45 @@ def _verdict(cpu: float, mem_avail: float, disk_free: float) -> str:
     return "🟢 fine"
 
 
+async def _containers() -> list[str]:
+    """Agent containers with their limits and current use (CPU as % of their own limit)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "ps", "--filter", "label=cot.agent=1", "--format", "{{.Names}}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return []
+    names = (await proc.communicate())[0].decode().split()
+    if not names:
+        return []
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "stats", "--no-stream", "--format", "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}", *names,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    stats = (await proc.communicate())[0].decode().splitlines()
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "inspect", "-f", "{{.Name}} {{.HostConfig.NanoCpus}}", *names,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    inspected = (await proc.communicate())[0].decode().splitlines()
+    cpus = {name.lstrip("/"): int(nano) / 1e9 for name, nano in (line.split() for line in inspected)}
+    rows = []
+    for line in stats:
+        name, cpu, mem = line.split("\t")
+        limit = cpus.get(name) or 0
+        pct = float(cpu.rstrip("%")) / (limit or 1)
+        used, _, max_mem = mem.partition(" / ")
+        rows.append(f"{name.removeprefix('cot-')}: cpu {pct:.0f}% of {limit:g}, ram {used} / {max_mem}")
+    return rows
+
+
 async def render(paths: list[Path]) -> str:
     if not Path("/proc/stat").exists():
         raise Unavailable("only supported on Linux")
     cores = os.cpu_count() or 1
     load1, load5, load15 = os.getloadavg()
-    cpu, top = await _sample()
+    (cpu, top), agents = await asyncio.gather(_sample(), _containers())
     mem = _meminfo()
     avail, total = mem["MemAvailable"], mem["MemTotal"]
     swap_used = mem["SwapTotal"] - mem["SwapFree"]
@@ -108,6 +141,8 @@ async def render(paths: list[Path]) -> str:
         *disks,
         f"up {_uptime()}",
     ]
+    if agents:
+        lines += ["", "agent containers:", *agents]
     if top:
         lines += ["", "busiest processes (% of one core):", *top]
     return "\n".join(lines)
