@@ -69,6 +69,19 @@ def reap(name: str) -> None:
     _docker("rm", "-f", name, capture_output=True, check=False)
 
 
+def _bytes(size: str) -> int:
+    units = {"b": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
+    size = size.strip().lower().removesuffix("b") or "0"
+    unit = size[-1] if size[-1] in units else "b"
+    return int(float(size.rstrip("bkmgt")) * units[unit])
+
+
+def limits(cpus: str, memory: str) -> dict[str, str]:
+    """Env for claude-docker.sh; swap as much again as memory, as docker does by default."""
+    mem = _bytes(memory)
+    return {"COT_CPUS": cpus, "COT_MEMORY": str(mem), "COT_MEMORY_SWAP": str(2 * mem)}
+
+
 def prepare(cfg: Config) -> tuple[str, dict[str, str]]:
     """Image ready and leftovers gone; returns the CLI path and env to give the SDK."""
     if not shutil.which("docker"):
@@ -89,7 +102,5 @@ def prepare(cfg: Config) -> tuple[str, dict[str, str]]:
     env = {
         "COT_IMAGE": _image(),
         "COT_CLAUDE": str(Path(claude).resolve()),
-        "COT_CPUS": cfg.docker_cpus,
-        "COT_MEMORY": cfg.docker_memory,
     }
     return str(WRAPPER), env

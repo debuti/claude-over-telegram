@@ -16,7 +16,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, history, permissions, server, uploads, usage
+from . import __version__, container, history, permissions, server, uploads, usage
 from .config import Config
 from .output import TelegramOutput
 from .session import Session
@@ -170,7 +170,9 @@ class Bot:
     def _runner(self, cwd: Path) -> dict:
         """How the conversation's Claude starts: in its container, or on the host for excluded folders."""
         if self.cfg.docker and cwd.name not in self.cfg.docker_exclude:
-            return {"cli_path": self.cli_path, "cli_env": self.cli_env, "sandbox_bash": False}
+            cpus, memory = self.cfg.docker_limits.get(cwd.name, (self.cfg.docker_cpus, self.cfg.docker_memory))
+            env = {**self.cli_env, **container.limits(cpus, memory)}
+            return {"cli_path": self.cli_path, "cli_env": env, "sandbox_bash": False}
         return {"cli_path": self.cfg.cli_path, "cli_env": {}, "sandbox_bash": self.cfg.sandbox_bash}
 
     def _session(self, key: Key) -> Session:

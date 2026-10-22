@@ -9,16 +9,19 @@
 # nothing runs in it. COT_* variables come from cot/container.py.
 set -euo pipefail
 
-# Same image, folder, limits and claude binary as the running container, or start anew.
-spec="$COT_IMAGE $PWD $COT_CPUS $COT_MEMORY $(stat -c %Y "$COT_CLAUDE")"
-current="$(docker container inspect -f '{{.State.Running}} {{index .Config.Labels "cot.spec"}}' "$COT_NAME" 2>/dev/null || true)"
+# Same image, folder and claude binary as the running container, or start anew. Limits
+# don't count: docker update changes them in place, without stopping what runs there.
+spec="$COT_IMAGE $PWD $(stat -c %Y "$COT_CLAUDE")"
+current="$(docker container inspect -f '{{.State.Running}} {{index .Config.Labels "cot.spec"}}' "$COT_NAME" 2>/dev/null \
+    | awk '{print $1, $2, $3, $NF}' || true)"  # labels up to 2.4 also held the limits
 if [[ "$current" != "true $spec" ]]; then
     docker rm -f "$COT_NAME" >/dev/null 2>&1 || true
     args=(run -d --init --name "$COT_NAME"
         --label cot.agent=1 --label "cot.spec=$spec"
         --user "$(id -u):$(id -g)"
         --network host
-        --cpus "$COT_CPUS" --memory "$COT_MEMORY" --pids-limit 4096 --shm-size 1g
+        --cpus "$COT_CPUS" --memory "$COT_MEMORY" --memory-swap "$COT_MEMORY_SWAP"
+        --pids-limit 4096 --shm-size 1g
         -e HOME="$HOME"
         -v "$PWD:$PWD"
         -v "$COT_CLAUDE:/usr/local/bin/claude:ro")
@@ -29,6 +32,8 @@ if [[ "$current" != "true $spec" ]]; then
         [[ -e "$HOME/$p" ]] && args+=(-v "$HOME/$p:$HOME/$p:ro")
     done
     docker "${args[@]}" "$COT_IMAGE" sleep infinity >/dev/null
+else
+    docker update --cpus "$COT_CPUS" --memory "$COT_MEMORY" --memory-swap "$COT_MEMORY_SWAP" "$COT_NAME" >/dev/null
 fi
 
 # A Claude from an earlier connection may still run: docker exec doesn't stop it when

@@ -23,6 +23,19 @@ class Config:
     docker_cpus: str
     docker_memory: str
     docker_exclude: frozenset[str]
+    docker_limits: dict[str, tuple[str, str]]  # folder -> (cpus, memory)
+
+
+def _limits(spec: str, cpus: str, memory: str) -> dict[str, tuple[str, str]]:
+    """"folder=cpus[:memory],…" into {folder: (cpus, memory)}, the defaults filling gaps."""
+    limits = {}
+    for item in spec.replace(" ", "").split(","):
+        if not item:
+            continue
+        folder, _, value = item.partition("=")
+        c, _, m = value.partition(":")
+        limits[folder] = (c or cpus, m or memory)
+    return limits
 
 
 def load(workdir: Path) -> Config:
@@ -55,5 +68,10 @@ def load(workdir: Path) -> Config:
         docker=os.environ.get("SANDBOX_DOCKER", "true").lower() in ("1", "true", "yes"),
         docker_cpus=os.environ.get("DOCKER_CPUS") or "2",
         docker_memory=os.environ.get("DOCKER_MEMORY") or "4g",
+        docker_limits=_limits(
+            os.environ.get("DOCKER_LIMITS", ""),
+            os.environ.get("DOCKER_CPUS") or "2",
+            os.environ.get("DOCKER_MEMORY") or "4g",
+        ),
         docker_exclude=frozenset(x for x in os.environ.get("DOCKER_EXCLUDE", "").replace(" ", "").split(",") if x),
     )
