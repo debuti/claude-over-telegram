@@ -66,14 +66,16 @@ async def save(msg: Message, workdir: Path) -> str:
 class AlbumCollector:
     """Groups the items of a Telegram album (same media_group_id) into one turn."""
 
-    def __init__(self, submit: Callable[[str], Awaitable[None]]):
+    def __init__(self, submit: Callable[[str, list[int]], Awaitable[None]]):
         self._submit = submit
+        self._ids: list[int] = []
         self._parts: list[str] = []
         self._captions: list[str] = []
         self._task: asyncio.Task | None = None
 
-    def add(self, line: str, caption: str | None) -> None:
+    def add(self, line: str, caption: str | None, msg_id: int) -> None:
         self._parts.append(line)
+        self._ids.append(msg_id)
         if caption:
             self._captions.append(caption)
         if self._task:
@@ -82,6 +84,6 @@ class AlbumCollector:
 
     async def _flush_later(self) -> None:
         await asyncio.sleep(ALBUM_WAIT)
-        text = "\n".join(self._parts + self._captions)
-        self._parts, self._captions, self._task = [], [], None
-        await self._submit(text)
+        text, ids = "\n".join(self._parts + self._captions), self._ids
+        self._parts, self._captions, self._ids, self._task = [], [], [], None
+        await self._submit(text, ids)

@@ -5,7 +5,7 @@ forum topics. Keying by thread from v1 keeps parallel topics (v2) cheap.
 """
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 Key = tuple[int, int | None]
@@ -20,6 +20,8 @@ class ConvState:
     tools: str = "hidden"  # hidden | calls | full (calls plus their results)
     cost_usd: float = 0.0  # estimated, accumulated over the whole conversation
     title: str | None = None  # topic name, known when the topic is created or renamed
+    # Messages not yet handed to Claude ({"text", "ids"}), so a restart doesn't lose them.
+    pending: list[dict] = field(default_factory=list)
 
 
 def _migrate(v: dict) -> dict:
@@ -47,6 +49,13 @@ class Store:
     def put(self, key: Key, state: ConvState) -> None:
         self._data[self._k(key)] = state
         self.save()
+
+    def items(self) -> list[tuple[Key, ConvState]]:
+        out = []
+        for k, state in self._data.items():
+            chat_id, thread_id = k.split(":")
+            out.append(((int(chat_id), int(thread_id) or None), state))
+        return out
 
     def save(self) -> None:
         tmp = self._path.with_suffix(".tmp")

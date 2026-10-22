@@ -11,7 +11,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -19,7 +19,6 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
-    StreamEvent,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -74,8 +73,11 @@ class Session:
         self._default_mode = default_mode
         self._cli_path = cli_path
         self._cli_env = cli_env
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
-        self._gathered: list[str] = []  # taken from the queue, waiting for the rest
+        # Items are {"text", "ids"}: ids of the Telegram messages, to acknowledge them.
+        self._queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._gathered: list[dict] = []  # taken from the queue, waiting for the rest
+        self.on_delivered: Callable[[list[int]], Awaitable[None]] | None = None
+        self.on_active: Callable[[], None] | None = None  # Claude started a turn on its own
         self._client: ClaudeSDKClient | None = None
         self._task: asyncio.Task | None = None
         self.busy = False
@@ -98,8 +100,6 @@ class Session:
             permission_mode=self.state.mode or self._default_mode,
             model=self.state.model,
             disallowed_tools=["AskUserQuestion"],
-            # Stream events tell when thinking starts, so the chat can show it live.
-            include_partial_messages=True,
             # The SDK's 1 MB default per message is too small for image/PDF reads (base64).
             max_buffer_size=64 * 1024 * 1024,
             mcp_servers={tg_tools.SERVER: tg_tools.make_server(self.out, Path(self.state.cwd))},
@@ -140,10 +140,16 @@ class Session:
         self._reader = asyncio.create_task(self._read(client))
 
     def start(self) -> None:
+        # Messages left waiting when the bot last stopped go first.
+        for item in self.state.pending:
+            self._queue.put_nowait(item)
         self._task = asyncio.create_task(self._run())
 
-    async def send(self, text: str) -> None:
-        await self._queue.put(text)
+    async def send(self, text: str, ids: list[int] | None = None) -> None:
+        item = {"text": text, "ids": ids or []}
+        self.state.pending.append(item)
+        self._on_state(self.state)
+        await self._queue.put(item)
 
     @property
     def pending(self) -> bool:
@@ -164,6 +170,8 @@ class Session:
         while not self._queue.empty():
             self._queue.get_nowait()
             dropped += 1
+        self.state.pending.clear()
+        self._on_state(self.state)
         running = self.busy
         if running:
             self._stopping = True
@@ -228,7 +236,7 @@ class Session:
     async def _run(self) -> None:
         while True:
             try:
-                text = await asyncio.wait_for(self._queue.get(), IDLE_DISCONNECT)
+                item = await asyncio.wait_for(self._queue.get(), IDLE_DISCONNECT)
             except asyncio.TimeoutError:
                 # Claude may be working on its own (a turn it started) or just have.
                 if self.busy or time.monotonic() - self._last_activity < IDLE_DISCONNECT:
@@ -237,8 +245,8 @@ class Session:
                 if self._in_docker:
                     await asyncio.to_thread(container.reap, self._container_name())
                 continue
-            text = await self._gather(text)
-            if not text:  # dropped by /stop while gathering
+            items = await self._gather(item)
+            if not items:  # dropped by /stop while gathering
                 continue
             self.busy = True
             try:
@@ -247,7 +255,7 @@ class Session:
                     await self._disconnect()
                 if self._client is None:
                     await self._connect()
-                await self._turn(text)
+                await self._turn(items)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -261,22 +269,27 @@ class Session:
                 self.busy = False
                 self._stopping = False
 
-    async def _gather(self, first: str) -> str:
+    async def _gather(self, first: dict) -> list[dict]:
         """The first message plus everything that follows it in quick succession."""
         self._gathered = [first]
         while True:
             try:
-                text = await asyncio.wait_for(self._queue.get(), GATHER_SECONDS)
+                item = await asyncio.wait_for(self._queue.get(), GATHER_SECONDS)
             except asyncio.TimeoutError:
                 break
-            self._gathered.append(text)  # after a /stop this starts afresh
-        text, self._gathered = "\n\n".join(self._gathered), []
-        return text
+            self._gathered.append(item)  # after a /stop this starts afresh
+        items, self._gathered = self._gathered, []
+        return items
 
-    async def _turn(self, text: str) -> None:
+    async def _turn(self, items: list[dict]) -> None:
         assert self._client
         self._turn_done = asyncio.get_running_loop().create_future()
-        await self._client.query(text)
+        await self._client.query("\n\n".join(item["text"] for item in items))
+        # Claude has them: no longer pending, and the user sees they arrived.
+        self.state.pending = [p for p in self.state.pending if p not in items]
+        self._on_state(self.state)
+        if self.on_delivered:
+            await self.on_delivered([i for item in items for i in item["ids"]])
         await self._turn_done
 
     async def _read(self, client: ClaudeSDKClient) -> None:
@@ -286,6 +299,8 @@ class Session:
                 self._last_activity = time.monotonic()
                 if not self.busy:  # a turn Claude started on its own
                     self.busy = True
+                    if self.on_active:
+                        self.on_active()
                 await self._handle(msg)
                 if isinstance(msg, ResultMessage):
                     await self.out.end_turn()
@@ -304,10 +319,7 @@ class Session:
                 self.busy = False
 
     async def _handle(self, msg) -> None:
-        if isinstance(msg, StreamEvent):
-            if msg.parent_tool_use_id is None:
-                await self._stream_event(msg.event)
-        elif isinstance(msg, AssistantMessage):
+        if isinstance(msg, AssistantMessage):
             nested = msg.parent_tool_use_id is not None
             if not nested and msg.model and not msg.model.startswith("<"):
                 self.model = msg.model
@@ -334,10 +346,3 @@ class Session:
             elif msg.is_error:
                 detail = "; ".join(msg.errors or []) or msg.subtype
                 await self.out.notice(f"⚠️ Claude ended with an error: {detail}")
-
-    async def _stream_event(self, event: dict) -> None:
-        kind = event.get("type")
-        if kind == "content_block_start" and event.get("content_block", {}).get("type") == "thinking":
-            await self.out.thinking_start()
-        elif kind == "content_block_stop":
-            await self.out.thinking_end()

@@ -72,7 +72,7 @@ class Bot:
         self.typing: dict[Key, asyncio.Task] = {}
         self.albums: dict[str, uploads.AlbumCollector] = {}
         # Messages sent to a topic before it has a folder; delivered once one is picked.
-        self.held: dict[Key, list[str]] = {}
+        self.held: dict[Key, list[tuple[str, list[int]]]] = {}
         self.app = (
             Application.builder()
             .token(cfg.telegram_token)
@@ -189,9 +189,25 @@ class Bot:
             default_mode=self.cfg.permission_mode,
             **self._runner(Path(state.cwd)),
         )
+        sess.on_delivered = lambda ids: self._acknowledge(key, ids)
+        sess.on_active = lambda: self._ensure_typing(key, sess)
         sess.start()
         self.sessions[key] = sess
+        if state.pending:
+            self._ensure_typing(key, sess)
         return sess
+
+    def _ensure_typing(self, key: Key, sess: Session) -> None:
+        if key not in self.typing:
+            self.typing[key] = asyncio.create_task(self._keep_typing(key, sess))
+
+    async def _acknowledge(self, key: Key, ids: list[int]) -> None:
+        """👀 on each message once Claude has it: one without it never arrived."""
+        for msg_id in ids:
+            try:
+                await self.app.bot.set_message_reaction(key[0], msg_id, reaction="👀")
+            except TelegramError as e:  # reactions off in this chat, message deleted…
+                log.debug("reaction failed: %s", e)
 
     async def _keep_typing(self, key: Key, sess: Session) -> None:
         chat_id, thread_id = key
@@ -206,22 +222,22 @@ class Bot:
             await asyncio.sleep(4)
         self.typing.pop(key, None)
 
-    async def _submit(self, key: Key, text: str) -> None:
+    async def _submit(self, key: Key, text: str, ids: list[int] | None = None) -> None:
         if not self._assigned(key):
             first = key not in self.held
-            self.held.setdefault(key, []).append(text)
+            self.held.setdefault(key, []).append((text, ids or []))
             if first:
                 await self._folder_picker(
                     key, "Pick the folder for this topic; your message goes to Claude right after:"
                 )
             return
         sess = self._session(key)
-        await sess.send(text)
-        if key not in self.typing:
-            self.typing[key] = asyncio.create_task(self._keep_typing(key, sess))
+        await sess.send(text, ids)
+        self._ensure_typing(key, sess)
 
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._submit(self._key(update), update.effective_message.text)
+        msg = update.effective_message
+        await self._submit(self._key(update), msg.text, [msg.message_id])
 
     async def _on_file(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
@@ -244,19 +260,25 @@ class Bot:
             album = self.albums.get(msg.media_group_id)
             if album is None:
                 group = msg.media_group_id
-                album = uploads.AlbumCollector(lambda text: self._album_done(group, key, text))
+                album = uploads.AlbumCollector(lambda text, ids: self._album_done(group, key, text, ids))
                 self.albums[group] = album
-            album.add(line, msg.caption)
+            album.add(line, msg.caption, msg.message_id)
             return
-        await self._submit(key, f"{line}\n{msg.caption}" if msg.caption else line)
+        await self._submit(key, f"{line}\n{msg.caption}" if msg.caption else line, [msg.message_id])
 
-    async def _album_done(self, group: str, key: Key, text: str) -> None:
+    async def _album_done(self, group: str, key: Key, text: str, ids: list[int]) -> None:
         self.albums.pop(group, None)
-        await self._submit(key, text)
+        await self._submit(key, text, ids)
 
     async def _post_init(self, app: Application) -> None:
         # Fills Telegram's command menu (the "/" button).
         await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in COMMANDS])
+        # Messages that were waiting for Claude when the bot stopped.
+        for key, state in self.store.items():
+            if state.pending and self._assigned(key):
+                n = len(state.pending)
+                await self._output(key).notice(f"↩️ Passing on {n} message{'s' * (n > 1)} sent before the restart")
+                self._session(key)
 
     async def _cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
@@ -317,8 +339,8 @@ class Bot:
         if any(s.state.cwd == state.cwd for k, s in self.sessions.items() if k != key):
             msg += "\n⚠️ Another conversation is also working in this directory."
         await self._output(key).notice(msg)
-        for text in self.held.pop(key, []):
-            await self._submit(key, text)
+        for text, ids in self.held.pop(key, []):
+            await self._submit(key, text, ids)
 
     async def _on_topic_created(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """A new topic named like a folder of the workdir works there; otherwise ask for one."""

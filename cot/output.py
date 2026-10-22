@@ -24,7 +24,6 @@ EDIT_INTERVAL = 1.5  # seconds between edits of the activity message
 PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 PHOTO_MAX = 10 * 1024 * 1024  # larger images go as documents
 RESULT_PREVIEW = 1500  # "full" mode: longer tool results are sent as a file
-THINKING_SHOW_AFTER = 3  # seconds; shorter thinking is not worth a line
 
 
 class TelegramOutput:
@@ -40,9 +39,6 @@ class TelegramOutput:
         self._last_edit = 0.0
         self._flush_task: asyncio.Task | None = None
         self._flush_lock = asyncio.Lock()
-        self._thinking_since: float | None = None
-        self._thinking_line: int | None = None  # index in _activity once shown
-        self._thinking_task: asyncio.Task | None = None
 
     # --- low level --------------------------------------------------------
 
@@ -169,7 +165,6 @@ class TelegramOutput:
         await self._close_activity()
 
     async def _close_activity(self) -> None:
-        await self.thinking_end()
         if self._flush_task:
             self._flush_task.cancel()
             self._flush_task = None
@@ -192,33 +187,6 @@ class TelegramOutput:
         line = tool_line(name, inp, self.cwd)
         self._activity.append(f"  ↳ {line}" if nested else line)
         await self._schedule_flush()
-
-    async def thinking_start(self) -> None:
-        if self._thinking_since is not None:
-            return
-        self._thinking_since = time.monotonic()
-        self._thinking_task = asyncio.create_task(self._show_thinking())
-
-    async def _show_thinking(self) -> None:
-        await asyncio.sleep(THINKING_SHOW_AFTER)
-        self._thinking_task = None
-        self._thinking_line = len(self._activity)
-        self._activity.append("💭 <i>Thinking…</i>")
-        await self._schedule_flush()
-
-    async def thinking_end(self) -> None:
-        """Called at the end of every content block; a no-op unless thinking was going on."""
-        if self._thinking_since is None:
-            return
-        secs = time.monotonic() - self._thinking_since
-        self._thinking_since = None
-        if self._thinking_task:
-            self._thinking_task.cancel()
-            self._thinking_task = None
-        if self._thinking_line is not None:
-            self._activity[self._thinking_line] = f"💭 <i>Thought for {secs:.0f}s</i>"
-            self._thinking_line = None
-            await self._schedule_flush()
 
     async def tool_result(self, content: Any, is_error: bool) -> None:
         if self.tools == "hidden" or (self.tools == "calls" and not is_error):
