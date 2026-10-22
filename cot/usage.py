@@ -78,8 +78,8 @@ def _pace(percent: float, iso: str | None) -> str:
     diff = left - lasts
     if abs(diff) < 3600:
         return f"\n⚖️ {pace}, at the current rate, runs out right at reset"
-    when = "before" if diff > 0 else "after"
-    return f"\n{'🔥' if diff > 0 else '🧊'} {pace}, at the current rate, runs out ~{_duration(abs(diff))} {when} reset"
+    icon, when = ("🔥", "before") if diff > 0 else ("🧊", "after")
+    return f"\n{icon} {pace}, at the current rate, runs out ~{_duration(abs(diff))} {when} reset"
 
 
 async def fetch() -> dict:
