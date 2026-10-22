@@ -93,6 +93,9 @@ class Bot:
         self.app.add_handler(
             MessageHandler(allowed & filters.StatusUpdate.FORUM_TOPIC_CREATED, self._on_topic_created)
         )
+        self.app.add_handler(
+            MessageHandler(allowed & filters.StatusUpdate.FORUM_TOPIC_EDITED, self._on_topic_edited)
+        )
         self.app.add_handler(CommandHandler("new", self._cmd_new, filters=allowed))
         self.app.add_handler(CommandHandler(["list", "resume"], self._cmd_resume, filters=allowed))
         self.app.add_handler(CommandHandler("tools", self._cmd_tools, filters=allowed))
@@ -141,7 +144,7 @@ class Bot:
             return sess.state
         state = self.store.get(key)
         if state is None or not self._valid_cwd(key, Path(state.cwd)):
-            state = ConvState(cwd=str(self.cfg.workdir))
+            state = ConvState(cwd=str(self.cfg.workdir), title=state and state.title)
         return state
 
     async def _ready(self, key: Key) -> bool:
@@ -302,7 +305,7 @@ class Bot:
         if sess:
             await sess.close()
         # A new directory means a new conversation; display preferences carry over.
-        state = ConvState(cwd=str(path), mode=old.mode, model=old.model, tools=old.tools)
+        state = ConvState(cwd=str(path), mode=old.mode, model=old.model, tools=old.tools, title=old.title)
         self.store.put(key, state)
         msg = f"📁 Working in {self._rel(state.cwd)} (new conversation)"
         if any(s.state.cwd == state.cwd for k, s in self.sessions.items() if k != key):
@@ -315,11 +318,23 @@ class Bot:
         """A new topic named like a folder of the workdir works there; otherwise ask for one."""
         key = self._key(update)
         name = update.effective_message.forum_topic_created.name.strip()
+        self._set_title(key, name)
         match = next((n for n in self._subdirs() if n.lower() == name.lower()), None)
         if match:
             await self._set_cwd(key, match)
         elif key not in self.held:
             await self._ready(key)
+
+    async def _on_topic_edited(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        name = update.effective_message.forum_topic_edited.name
+        if name:  # None when only the icon changed
+            self._set_title(self._key(update), name.strip())
+
+    def _set_title(self, key: Key, title: str) -> None:
+        """Remembered to name the conversation's container (from its next start)."""
+        state = self._state(key)
+        state.title = title
+        self.store.put(key, state)
 
     async def _cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)

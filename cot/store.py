@@ -19,6 +19,7 @@ class ConvState:
     model: str | None = None
     tools: str = "hidden"  # hidden | calls | full (calls plus their results)
     cost_usd: float = 0.0  # estimated, accumulated over the whole conversation
+    title: str | None = None  # topic name, known when the topic is created or renamed
 
 
 def _migrate(v: dict) -> dict:

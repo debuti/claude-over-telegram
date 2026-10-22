@@ -6,6 +6,7 @@ Claude one turn at a time and forwards the output through callbacks.
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -89,7 +90,7 @@ class Session:
             allowed_tools=[tg_tools.SEND_FILE],
             system_prompt={"type": "preset", "preset": "claude_code", "append": APPEND_PROMPT},
             cli_path=self._cli_path,
-            env=self._cli_env,
+            env={**self._cli_env, "COT_NAME": self._container_name()},
             can_use_tool=permissions.make_can_use_tool(self.out, Path(self.state.cwd), self._set_waiting),
             hooks={"PreToolUse": [make_hook(Path(self.state.cwd))]},
             # Bash writes confined to cwd; needs working unprivileged bubblewrap on Linux.
@@ -97,6 +98,12 @@ class Session:
             if self._sandbox_bash
             else None,
         )
+
+    def _container_name(self) -> str:
+        """cot-<topic or folder>-<topic id>: tells conversations apart in docker ps."""
+        label = self.state.title or Path(self.state.cwd).name
+        slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")[:40] or "chat"
+        return f"cot-{slug}-{self.out.thread_id or abs(self.out.chat_id)}"
 
     async def _connect(self) -> None:
         client = ClaudeSDKClient(self._options())

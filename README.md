@@ -248,7 +248,9 @@ container sees only:
   is a hole in the isolation: whatever your SSH key and `gh` can reach, Claude
   can too.
 
-It is capped at `DOCKER_CPUS` and `DOCKER_MEMORY`, so a runaway test suite can't
+Containers are named `cot-<topic or folder>-<topic id>`, so `docker ps` shows
+which is which (topics created or renamed before 2.2 show their folder instead).
+Each is capped at `DOCKER_CPUS` and `DOCKER_MEMORY`, so a runaway test suite can't
 make the machine (and the bot) unresponsive. It shares the host network, so dev
 servers and local services are reachable as usual, but it has no Docker socket:
 it can't start containers of its own. The image (`docker/Dockerfile`) is based

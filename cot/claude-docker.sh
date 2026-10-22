@@ -5,7 +5,10 @@
 # COT_* variables come from cot/container.py.
 set -euo pipefail
 
-args=(run -i --rm --init
+# One container per conversation: drop one a previous connection may have left.
+docker rm -f "$COT_NAME" >/dev/null 2>&1 || true
+
+args=(run -i --rm --init --name "$COT_NAME"
     --label cot.agent=1
     --user "$(id -u):$(id -g)"
     --network host
