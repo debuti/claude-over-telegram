@@ -1,7 +1,9 @@
 """Claude subscription usage (the 5-hour and weekly limits that /usage shows in the terminal)."""
 
+import asyncio
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,14 +23,24 @@ class Unavailable(Exception):
     pass
 
 
-def _token() -> str:
-    """OAuth token of the Claude Code login on this machine (refreshed by the CLI itself)."""
+def _login() -> dict:
+    """OAuth login of Claude Code on this machine (the CLI refreshes it)."""
     config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     try:
-        creds = json.loads((config_dir / ".credentials.json").read_text())
-        return creds["claudeAiOauth"]["accessToken"]
+        return json.loads((config_dir / ".credentials.json").read_text())["claudeAiOauth"]
     except (OSError, ValueError, KeyError):
         raise Unavailable("no Claude subscription login found (API keys have no plan limits)") from None
+
+
+async def _refresh(cli: str) -> None:
+    """`claude auth status` renews an expired token, without a model call."""
+    proc = await asyncio.create_subprocess_exec(
+        cli, "auth", "status", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+    )
+    try:
+        await asyncio.wait_for(proc.wait(), 30)
+    except asyncio.TimeoutError:
+        proc.kill()
 
 
 def _bar(percent: float, width: int = 10) -> str:
@@ -82,14 +94,22 @@ def _pace(percent: float, iso: str | None) -> str:
     return f"\n{icon} {pace}, at the current rate, runs out ~{_duration(abs(diff))} {when} reset"
 
 
-async def fetch() -> dict:
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(
-            URL,
-            headers={"Authorization": f"Bearer {_token()}", "anthropic-beta": "oauth-2025-04-20"},
-        )
+async def fetch(cli: str) -> dict:
+    # After a while with no Claude running (a reboot, a quiet night) the token has expired.
+    if _login().get("expiresAt", 0) / 1000 < time.time() + 60:
+        await _refresh(cli)
+    for attempt in range(2):
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                URL,
+                headers={"Authorization": f"Bearer {_login()['accessToken']}", "anthropic-beta": "oauth-2025-04-20"},
+            )
+        if r.status_code != 401:
+            break
+        if attempt == 0:
+            await _refresh(cli)
     if r.status_code == 401:
-        raise Unavailable("login expired; it is refreshed the next time Claude runs")
+        raise Unavailable("the Claude login was rejected; log in again with `claude /login`")
     r.raise_for_status()
     return r.json()
 

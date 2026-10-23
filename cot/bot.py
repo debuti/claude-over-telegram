@@ -554,7 +554,7 @@ class Bot:
     async def _cmd_usage(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         out = self._output(self._key(update))
         try:
-            text = usage.render(await usage.fetch())
+            text = usage.render(await usage.fetch(self.cfg.cli_path or container.bundled_cli()))
         except usage.Unavailable as e:
             text = f"⚠️ Usage not available: {e}"
         except Exception as e:

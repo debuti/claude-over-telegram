@@ -82,6 +82,10 @@ def limits(cpus: str, memory: str) -> dict[str, str]:
     return {"COT_CPUS": cpus, "COT_MEMORY": str(mem), "COT_MEMORY_SWAP": str(2 * mem)}
 
 
+def bundled_cli() -> str:
+    return str(Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude")
+
+
 def prepare(cfg: Config) -> tuple[str, dict[str, str]]:
     """Image ready and leftovers gone; returns the CLI path and env to give the SDK."""
     if not shutil.which("docker"):
@@ -98,7 +102,7 @@ def prepare(cfg: Config) -> tuple[str, dict[str, str]]:
     for name in names.stdout.split():
         reap(name)
 
-    claude = cfg.cli_path or str(Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude")
+    claude = cfg.cli_path or bundled_cli()
     # The SDK checks the CLI version on every connect: a whole container each time.
     os.environ["CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"] = "1"
     env = {
