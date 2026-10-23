@@ -102,6 +102,7 @@ All settings live in `.env` next to the code (see `.env.example`):
 | `DOCKER_CPUS`      | `2`        | CPUs each container may use                                     |
 | `DOCKER_MEMORY`    | `4g`       | Memory each container may use                                   |
 | `DOCKER_LIMITS`    | (empty)    | Per-folder limits, `folder=cpus[:memory],…` (e.g. `web=4:6g`); applied to running containers too |
+| `DOCKER_MOUNTS`    | (empty)    | Extra host paths a folder's container sees read-only, `folder=path[+path],…` (e.g. `web=~/workspace`); its container is recreated to add them |
 | `DOCKER_EXCLUDE`   | (empty)    | Comma-separated folders whose conversations run on the host, outside Docker |
 | `SANDBOX_BASH`     | `false`    | Without Docker: confine Bash writes to the workdir too          |
 | `CLAUDE_CLI_PATH`  | (bundled)  | Use this `claude` binary instead of the one bundled with the SDK |

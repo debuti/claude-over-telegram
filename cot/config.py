@@ -23,6 +23,7 @@ class Config:
     docker_cpus: str
     docker_memory: str
     docker_exclude: frozenset[str]
+    docker_mounts: dict[str, list[str]]  # folder -> host paths it also sees, read-only
     docker_limits: dict[str, tuple[str, str]]  # folder -> (cpus, memory)
 
 
@@ -73,5 +74,11 @@ def load(workdir: Path) -> Config:
             os.environ.get("DOCKER_CPUS") or "2",
             os.environ.get("DOCKER_MEMORY") or "4g",
         ),
+        docker_mounts={
+            folder: [str(Path(p).expanduser()) for p in paths.split("+") if p]
+            for folder, _, paths in (
+                item.partition("=") for item in os.environ.get("DOCKER_MOUNTS", "").replace(" ", "").split(",") if item
+            )
+        },
         docker_exclude=frozenset(x for x in os.environ.get("DOCKER_EXCLUDE", "").replace(" ", "").split(",") if x),
     )

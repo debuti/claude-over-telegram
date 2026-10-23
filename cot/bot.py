@@ -172,6 +172,8 @@ class Bot:
         if self.cfg.docker and cwd.name not in self.cfg.docker_exclude:
             cpus, memory = self.cfg.docker_limits.get(cwd.name, (self.cfg.docker_cpus, self.cfg.docker_memory))
             env = {**self.cli_env, **container.limits(cpus, memory)}
+            if mounts := self.cfg.docker_mounts.get(cwd.name):
+                env["COT_MOUNTS"] = "\n".join(mounts)
             return {"cli_path": self.cli_path, "cli_env": env, "sandbox_bash": False}
         return {"cli_path": self.cfg.cli_path, "cli_env": {}, "sandbox_bash": self.cfg.sandbox_bash}
 

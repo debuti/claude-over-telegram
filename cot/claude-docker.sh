@@ -13,11 +13,14 @@ set -euo pipefail
 # restarted) may not pass COT_MEMORY_SWAP: unlimited swap then, rather than failing.
 swap="${COT_MEMORY_SWAP:--1}"
 
-# Same image, folder and claude binary as the running container, or start anew. Limits
-# don't count: docker update changes them in place, without stopping what runs there.
+# Extra host paths (one per line) the container sees read-only, at the same path.
+mounts="${COT_MOUNTS:-}"
+
+# Same image, folder, claude binary and extra mounts as the running container, or start
+# anew. Limits don't count: docker update changes them in place, without stopping anything.
 spec="$COT_IMAGE $PWD $(stat -c %Y "$COT_CLAUDE")"
-current="$(docker container inspect -f '{{.State.Running}} {{index .Config.Labels "cot.spec"}}' "$COT_NAME" 2>/dev/null \
-    | awk '{print $1, $2, $3, $NF}' || true)"  # labels up to 2.4 also held the limits
+[[ -z "$mounts" ]] || spec+=" mounts:$(printf %s "$mounts" | md5sum | cut -c1-8)"
+current="$(docker container inspect -f '{{.State.Running}} {{index .Config.Labels "cot.spec"}}' "$COT_NAME" 2>/dev/null || true)"
 if [[ "$current" != "true $spec" ]]; then
     docker rm -f "$COT_NAME" >/dev/null 2>&1 || true
     args=(run -d --init --name "$COT_NAME"
@@ -36,6 +39,10 @@ if [[ "$current" != "true $spec" ]]; then
     for p in .gitconfig .ssh .config/gh; do
         [[ -e "$HOME/$p" ]] && args+=(-v "$HOME/$p:$HOME/$p:ro")
     done
+    # Docker mounts parents first, so the conversation's folder stays writable inside one.
+    while IFS= read -r m; do
+        [[ -n "$m" && -e "$m" ]] && args+=(-v "$m:$m:ro")
+    done <<< "$mounts"
     docker "${args[@]}" "$COT_IMAGE" sleep infinity >/dev/null
 else
     docker update --cpus "$COT_CPUS" --memory "$COT_MEMORY" --memory-swap "$swap" "$COT_NAME" >/dev/null
