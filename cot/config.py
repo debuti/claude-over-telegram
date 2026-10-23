@@ -23,7 +23,8 @@ class Config:
     docker_cpus: str
     docker_memory: str
     docker_exclude: frozenset[str]
-    docker_mounts: dict[str, list[str]]  # folder -> host paths it also sees, read-only
+    docker_mounts: dict[str, list[str]]  # folder ("*": all) -> host paths it also sees, "path[:rw]"
+    docker_path: str  # prepended to PATH in containers, e.g. for binaries in a mounted folder
     docker_limits: dict[str, tuple[str, str]]  # folder -> (cpus, memory)
 
 
@@ -37,6 +38,17 @@ def _limits(spec: str, cpus: str, memory: str) -> dict[str, tuple[str, str]]:
         c, _, m = value.partition(":")
         limits[folder] = (c or cpus, m or memory)
     return limits
+
+
+def _mounts(spec: str) -> dict[str, list[str]]:
+    """"folder=path[:rw][+path…],…" into {folder: ["path", "path:rw", …]}; folder "*" is every one."""
+    mounts: dict[str, list[str]] = {}
+    for item in spec.replace(" ", "").split(","):
+        folder, _, paths = item.partition("=")
+        for p in filter(None, paths.split("+")):
+            path, rw = (p[:-3], ":rw") if p.endswith(":rw") else (p.removesuffix(":ro"), "")
+            mounts.setdefault(folder, []).append(str(Path(path).expanduser()) + rw)
+    return mounts
 
 
 def load(workdir: Path) -> Config:
@@ -74,11 +86,9 @@ def load(workdir: Path) -> Config:
             os.environ.get("DOCKER_CPUS") or "2",
             os.environ.get("DOCKER_MEMORY") or "4g",
         ),
-        docker_mounts={
-            folder: [str(Path(p).expanduser()) for p in paths.split("+") if p]
-            for folder, _, paths in (
-                item.partition("=") for item in os.environ.get("DOCKER_MOUNTS", "").replace(" ", "").split(",") if item
-            )
-        },
+        docker_mounts=_mounts(os.environ.get("DOCKER_MOUNTS", "")),
+        docker_path=":".join(
+            str(Path(p).expanduser()) for p in os.environ.get("DOCKER_PATH", "").replace(" ", "").split(":") if p
+        ),
         docker_exclude=frozenset(x for x in os.environ.get("DOCKER_EXCLUDE", "").replace(" ", "").split(",") if x),
     )

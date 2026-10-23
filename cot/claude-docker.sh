@@ -13,7 +13,8 @@ set -euo pipefail
 # restarted) may not pass COT_MEMORY_SWAP: unlimited swap then, rather than failing.
 swap="${COT_MEMORY_SWAP:--1}"
 
-# Extra host paths (one per line) the container sees read-only, at the same path.
+# Extra host paths (one per line, "path" or "path:rw"), seen at the same path, read-only
+# unless :rw.
 mounts="${COT_MOUNTS:-}"
 
 # Same image, folder, claude binary and extra mounts as the running container, or start
@@ -41,7 +42,9 @@ if [[ "$current" != "true $spec" ]]; then
     done
     # Docker mounts parents first, so the conversation's folder stays writable inside one.
     while IFS= read -r m; do
-        [[ -n "$m" && -e "$m" ]] && args+=(-v "$m:$m:ro")
+        mode=ro
+        [[ "$m" == *:rw ]] && { m="${m%:rw}"; mode=rw; }
+        [[ -n "$m" && -e "$m" ]] && args+=(-v "$m:$m:$mode")
     done <<< "$mounts"
     docker "${args[@]}" "$COT_IMAGE" sleep infinity >/dev/null
 else
@@ -56,6 +59,8 @@ docker exec "$COT_NAME" sh -c 'pkill -x claude || exit 0
 
 # Only what Claude needs from the bot's environment: never the Telegram token.
 exec_args=(exec -i -w "$PWD")
+# Binaries from mounted folders first (the image's own PATH after them).
+[[ -z "${COT_PATH:-}" ]] || exec_args+=(-e "PATH=$COT_PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 # Commands below Claude in priority (containers from before 2.7 lack the script).
 docker exec "$COT_NAME" test -x /usr/local/bin/cot-shell \
     && exec_args+=(-e CLAUDE_CODE_SHELL_PREFIX=/usr/local/bin/cot-shell)
