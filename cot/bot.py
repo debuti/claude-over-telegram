@@ -201,6 +201,7 @@ class Bot:
         sess.on_active = lambda: self._ensure_typing(key, sess)
         sess.on_turn_start = lambda: self.usage_log.turn_started(key)
         sess.on_turn_end = lambda entry: self._log_turn(key, sess, entry)
+        sess.on_turn_failed = lambda: self.usage_log.turn_failed(key)
         sess.start()
         self.sessions[key] = sess
         if state.pending:

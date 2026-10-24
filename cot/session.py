@@ -128,6 +128,7 @@ class Session:
         self.on_turn_start: Callable[[], None] | None = None
         # The turn's cost, tokens and API calls, for the usage log.
         self.on_turn_end: Callable[[dict], Awaitable[None]] | None = None
+        self.on_turn_failed: Callable[[], None] | None = None  # ended without a result
         self._client: ClaudeSDKClient | None = None
         self._task: asyncio.Task | None = None
         self.busy = False
@@ -338,6 +339,8 @@ class Session:
                 raise
             except Exception as e:
                 log.exception("turn failed")
+                if self.on_turn_failed:
+                    self.on_turn_failed()
                 await self.out.notice(f"⚠️ Error: {e}")
                 # Drop the client so the next message reconnects (resuming the session).
                 await self._disconnect()
@@ -366,6 +369,8 @@ class Session:
             raise
         except Exception as e:
             log.exception("compaction failed")
+            if self.on_turn_failed:
+                self.on_turn_failed()
             await self.out.notice(f"⚠️ Could not compact, going on without: {e}")
             if not self._alive():
                 await self._disconnect()
@@ -479,7 +484,7 @@ class Session:
                 entry = {
                     "session": msg.session_id,
                     "cost": self.last_turn_cost if msg.total_cost_usd is not None else None,
-                    "api_calls": msg.num_turns,
+                    "turns": msg.num_turns,
                     "seconds": round(msg.duration_ms / 1000),
                     "tokens": {k: u.get(k) for k in TOKEN_KINDS},
                     "by": "compact" if self._compacting else "user" if self._turn_done else "claude",

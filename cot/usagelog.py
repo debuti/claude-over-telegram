@@ -49,8 +49,13 @@ class UsageLog:
             return limits
 
     def turn_started(self, key: object) -> None:
-        # Replaces the reading of a turn that failed without a result.
         self._before[key] = asyncio.create_task(self._limits())
+
+    def turn_failed(self, key: object) -> None:
+        """A turn that ended without a result: its reading must not pass for the next turn's."""
+        before = self._before.pop(key, None)
+        if before:
+            before.cancel()
 
     async def turn_ended(self, key: object, entry: dict) -> None:
         before = self._before.pop(key, None)
@@ -68,6 +73,11 @@ class UsageLog:
 
 
 def summary(path: Path) -> str:
+    """Per conversation: log entries, Claude's turns in them (num_turns), cost and plan %.
+
+    The % columns leave out entries that ran alongside other conversations (parallel > 0):
+    the windows moved for all of them together. `par` says how many were left out.
+    """
     convs: dict[str, dict] = defaultdict(lambda: defaultdict(float))
     for line in path.read_text().splitlines():
         try:
@@ -75,18 +85,21 @@ def summary(path: Path) -> str:
         except ValueError:
             continue
         c = convs[e.get("conversation") or "?"]
-        c["turns"] += 1
+        c["entries"] += 1
         c["cost"] += e.get("cost") or 0
-        c["api_calls"] += e.get("api_calls") or 0
+        c["turns"] += e.get("turns", e.get("api_calls")) or 0  # api_calls: entries before 2.13
+        if e.get("parallel"):
+            c["parallel"] += 1
+            continue
         before, after = e.get("before") or {}, e.get("after") or {}
         for kind in after:
             if before.get(kind) is not None and after[kind] is not None and after[kind] >= before[kind]:
                 c[kind] += after[kind] - before[kind]  # a window that reset mid-turn is skipped
-    rows = [f"{'conversation':30} {'turns':>5} {'calls':>6} {'cost':>8} {'5h %':>6} {'week %':>6}"]
+    rows = [f"{'conversation':30} {'entries':>7} {'turns':>6} {'cost':>8} {'5h %':>6} {'week %':>6} {'par':>4}"]
     for name, c in sorted(convs.items(), key=lambda kv: -kv[1]["cost"]):
         rows.append(
-            f"{name[:30]:30} {int(c['turns']):5} {int(c['api_calls']):6} {c['cost']:8.2f} "
-            f"{c['session']:6.0f} {c['weekly_all']:6.0f}"
+            f"{name[:30]:30} {int(c['entries']):7} {int(c['turns']):6} {c['cost']:8.2f} "
+            f"{c['session']:6.0f} {c['weekly_all']:6.0f} {int(c['parallel']):4}"
         )
     return "\n".join(rows)
 
