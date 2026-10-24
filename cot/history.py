@@ -23,7 +23,7 @@ def find(sessions: list[SDKSessionInfo], ref: str) -> SDKSessionInfo | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _ago(ts: float) -> str:
+def ago(ts: float) -> str:
     secs = time.time() - (ts / 1000 if ts > 1e11 else ts)  # epoch ms or s
     for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
         if secs >= size:
@@ -36,11 +36,14 @@ def title(s: SDKSessionInfo, width: int = 70) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
 
 
-def render(sessions: list[SDKSessionInfo], current: str | None, where: str) -> str:
+FOOTER = "Tap a number, or /resume &lt;number or id&gt;. /new starts a fresh one."
+
+
+def render(sessions: list[SDKSessionInfo], current: str | None, where: str, footer: str = FOOTER) -> str:
     lines = [f"🗂 Recent conversations in <b>{esc(where)}</b>"]
     for i, s in enumerate(sessions, 1):
         mark = " ● <i>(this one)</i>" if s.session_id == current else ""
-        meta = " · ".join(x for x in (_ago(s.last_modified), s.git_branch, s.session_id[:8]) if x)
+        meta = " · ".join(x for x in (ago(s.last_modified), s.git_branch, s.session_id[:8]) if x)
         lines.append(f"<b>{i}.</b> {esc(title(s))}{mark}\n      <i>{esc(meta)}</i>")
-    lines.append("Tap a number, or /resume &lt;number or id&gt;. /new starts a fresh one.")
+    lines.append(footer)
     return "\n\n".join(lines)

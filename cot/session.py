@@ -39,8 +39,12 @@ APPEND_PROMPT = (
     "To give the user a file, send it with the send_file tool. "
     "This session's process stops after a while without messages and when the bot restarts, "
     "and the commands it is running stop with it. Start anything that may take more than a few "
-    "minutes (test suites, builds, servers) detached, e.g. `setsid nohup cmd > job.log 2>&1 &`, "
-    "and follow its log: detached jobs keep running."
+    "minutes (test suites, builds, servers) detached, e.g. `setsid nohup cmd > job.log 2>&1 & echo $!`: "
+    "detached jobs keep running. Don't poll a job (no `sleep; tail` rounds, no checking every so "
+    "often): each check re-sends the whole conversation and costs a full request. Wait for it in "
+    "a single command run in the background, which tells you when it ends, e.g. Bash with "
+    "run_in_background and `while kill -0 PID 2>/dev/null; do sleep 15; done; tail -n 50 job.log`, "
+    "and end your turn meanwhile; for one that runs for hours, tell the user how to ask you later."
 )
 IDLE_DISCONNECT = 30 * 60  # stop the idle Claude process; the next message resumes it
 # Telegram splits long texts into several messages: wait this long after the last one
@@ -48,6 +52,7 @@ IDLE_DISCONNECT = 30 * 60  # stop the idle Claude process; the next message resu
 GATHER_SECONDS = 3.0
 
 OnState = Callable[[ConvState], None]
+TOKEN_KINDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 
 
 def _transcripts(session_id: str) -> list[Path]:
@@ -97,6 +102,9 @@ class Session:
         self._gathered: list[dict] = []  # taken from the queue, waiting for the rest
         self.on_delivered: Callable[[list[int]], Awaitable[None]] | None = None
         self.on_active: Callable[[], None] | None = None  # Claude started a turn on its own
+        self.on_turn_start: Callable[[], None] | None = None
+        # The turn's cost, tokens and API calls, for the usage log.
+        self.on_turn_end: Callable[[dict], Awaitable[None]] | None = None
         self._client: ClaudeSDKClient | None = None
         self._task: asyncio.Task | None = None
         self.busy = False
@@ -172,6 +180,11 @@ class Session:
     def pending(self) -> bool:
         """True while a turn runs or messages wait in the queue."""
         return self.busy or bool(self._gathered) or not self._queue.empty()
+
+    @property
+    def connected(self) -> bool:
+        """True while a Claude process is up for this conversation."""
+        return self._client is not None
 
     @property
     def queued(self) -> int:
@@ -301,6 +314,9 @@ class Session:
     async def _turn(self, items: list[dict]) -> None:
         assert self._client
         self._turn_done = asyncio.get_running_loop().create_future()
+        self.state.last_active = time.time()
+        if self.on_turn_start:
+            self.on_turn_start()
         await self._client.query("\n\n".join(item["text"] for item in items))
         # Claude has them: no longer pending, and the user sees they arrived.
         self.state.pending = [p for p in self.state.pending if p not in items]
@@ -314,8 +330,11 @@ class Session:
         try:
             async for msg in client.receive_messages():
                 self._last_activity = time.monotonic()
+                self.state.last_active = time.time()  # saved with the turn's result
                 if not self.busy:  # a turn Claude started on its own
                     self.busy = True
+                    if self.on_turn_start:
+                        self.on_turn_start()
                     if self.on_active:
                         self.on_active()
                 await self._handle(msg)
@@ -359,6 +378,17 @@ class Session:
                 self.last_turn_cost = max(msg.total_cost_usd - self.state.cost_usd, 0.0)
                 self.state.cost_usd = msg.total_cost_usd
                 self._on_state(self.state)
+            if self.on_turn_end:
+                u = msg.usage or {}
+                entry = {
+                    "session": msg.session_id,
+                    "cost": self.last_turn_cost if msg.total_cost_usd is not None else None,
+                    "api_calls": msg.num_turns,
+                    "seconds": round(msg.duration_ms / 1000),
+                    "tokens": {k: u.get(k) for k in TOKEN_KINDS},
+                    "by": "user" if self._turn_done else "claude",
+                }
+                asyncio.create_task(self.on_turn_end(entry))
             if self._stopping or (msg.terminal_reason or "").startswith("aborted"):
                 await self.out.notice("🛑 Stopped")
             elif msg.is_error:

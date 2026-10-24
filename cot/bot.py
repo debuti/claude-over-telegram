@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -16,10 +17,10 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, container, history, permissions, server, uploads, usage
+from . import __version__, container, history, permissions, server, uploads, usage, usagelog
 from .config import Config
 from .output import TelegramOutput
-from .session import Session, transcript_cost
+from .session import IDLE_DISCONNECT, Session, transcript_cost
 from .store import ConvState, Key, Store
 
 log = logging.getLogger(__name__)
@@ -73,6 +74,10 @@ class Bot:
         self.albums: dict[str, uploads.AlbumCollector] = {}
         # Messages sent to a topic before it has a folder; delivered once one is picked.
         self.held: dict[Key, list[tuple[str, list[int]]]] = {}
+        # Messages to a conversation that went to sleep; delivered once the user picks where
+        # they go (that conversation, another one, a new one).
+        self.parked: dict[Key, list[tuple[str, list[int]]]] = {}
+        self.usage_log = usagelog.UsageLog(cfg.state_dir / "usage.jsonl", cfg.cli_path or container.bundled_cli())
         self.app = (
             Application.builder()
             .token(cfg.telegram_token)
@@ -196,11 +201,18 @@ class Bot:
         )
         sess.on_delivered = lambda ids: self._acknowledge(key, ids)
         sess.on_active = lambda: self._ensure_typing(key, sess)
+        sess.on_turn_start = lambda: self.usage_log.turn_started(key)
+        sess.on_turn_end = lambda entry: self._log_turn(key, sess, entry)
         sess.start()
         self.sessions[key] = sess
         if state.pending:
             self._ensure_typing(key, sess)
         return sess
+
+    async def _log_turn(self, key: Key, sess: Session, entry: dict) -> None:
+        parallel = sum(1 for k, s in self.sessions.items() if k != key and s.busy)
+        name = sess.state.title or Path(sess.state.cwd).name
+        await self.usage_log.turn_ended(key, {"conversation": name, **entry, "parallel": parallel})
 
     def _ensure_typing(self, key: Key, sess: Session) -> None:
         if key not in self.typing:
@@ -236,9 +248,64 @@ class Bot:
                     key, "Pick the folder for this topic; your message goes to Claude right after:"
                 )
             return
+        if key in self.parked or self._asleep(key):
+            first = key not in self.parked
+            self.parked.setdefault(key, []).append((text, ids or []))
+            if first:
+                await self._wake_picker(key)
+            return
         sess = self._session(key)
         await sess.send(text, ids)
         self._ensure_typing(key, sess)
+
+    def _asleep(self, key: Key) -> bool:
+        """A conversation whose Claude stopped for lack of use: where its next message goes is asked."""
+        state = self._state(key)
+        sess = self.sessions.get(key)
+        if not state.session_id or (sess and (sess.connected or sess.pending)):
+            return False
+        return time.time() - state.last_active >= IDLE_DISCONNECT
+
+    async def _wake_picker(self, key: Key) -> None:
+        state = self._state(key)
+        sessions = await history.recent(state.cwd)
+        buttons = [
+            InlineKeyboardButton(str(i), callback_data=f"wake:{s.session_id}") for i, s in enumerate(sessions, 1)
+        ]
+        rows = [buttons[i : i + 5] for i in range(0, len(buttons), 5)]
+        rows.append(
+            [
+                InlineKeyboardButton("▶️ Continue this one", callback_data=f"wake:{state.session_id}"),
+                InlineKeyboardButton("🆕 New one", callback_data="wake:new"),
+            ]
+        )
+        idle = f" (last used {history.ago(state.last_active)})" if state.last_active else ""
+        footer = (
+            f"💤 This conversation was asleep{idle}. Continue it, pick another one or start a new one: "
+            "your message goes there right after."
+        )
+        text = history.render(sessions, state.session_id, self._where(key), footer)
+        await self._output(key).send_html(text, reply_markup=InlineKeyboardMarkup(rows))
+
+    async def _wake(self, key: Key, choice: str) -> None:
+        state = self._state(key)
+        if choice == "new":
+            await self._new(key)
+        elif choice == state.session_id:
+            state.last_active = time.time()
+            self.store.put(key, state)
+            await self._output(key).notice("▶️ Continuing this conversation")
+        else:
+            await self._resume(key, choice)
+            if self._state(key).session_id != choice:  # it could not be resumed: ask again
+                if self.parked.get(key):
+                    await self._wake_picker(key)
+                return
+        await self._unpark(key)
+
+    async def _unpark(self, key: Key) -> None:
+        for text, ids in self.parked.pop(key, []):
+            await self._submit(key, text, ids)
 
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
@@ -373,6 +440,10 @@ class Bot:
         key = self._key(update)
         if not await self._ready(key):
             return
+        await self._new(key)
+        await self._unpark(key)
+
+    async def _new(self, key: Key) -> None:
         sess = self.sessions.pop(key, None)
         if sess:
             await sess.close()
@@ -393,6 +464,7 @@ class Bot:
             found = history.find(sessions, ctx.args[0])
             if found:
                 await self._resume(key, found.session_id)
+                await self._unpark(key)
             else:
                 await self._output(key).notice(f"⚠️ No conversation {ctx.args[0]} here; /list shows them.")
             return
@@ -425,6 +497,7 @@ class Bot:
             await sess.close()
         state.session_id = session_id
         state.cost_usd = await asyncio.to_thread(transcript_cost, session_id)
+        state.last_active = time.time()
         self.store.put(key, state)
         await self._output(key).notice(
             f"⏪ Resumed: {history.title(info)}\n"
@@ -595,12 +668,17 @@ class Bot:
             await query.answer()
             await query.edit_message_reply_markup(None)
             await self._set_cwd(key, rest)
-        elif kind in ("tools", "model", "mode", "resume") and not await self._ready(key):
+        elif kind in ("tools", "model", "mode", "resume", "wake") and not await self._ready(key):
             await query.answer()
         elif kind == "resume":
             await query.answer()
             await query.edit_message_reply_markup(None)
             await self._resume(key, rest)
+            await self._unpark(key)
+        elif kind == "wake":
+            await query.answer()
+            await query.edit_message_reply_markup(None)
+            await self._wake(key, rest)
         elif kind == "tools":
             await query.answer()
             await query.edit_message_reply_markup(None)

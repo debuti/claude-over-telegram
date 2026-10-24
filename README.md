@@ -22,6 +22,8 @@ and only the Telegram users you allow can talk to it.
 - Send photos and files to Claude; Claude can send files back.
 - Writes confined to the workdir (and optionally Bash too, through a sandbox).
 - `/usage` shows your plan limits, `/cost` the API-price estimate of a conversation.
+  Every turn is logged to `state/usage.jsonl` with its cost and the plan limits
+  before and after it; `python -m cot.usagelog` sums it up per conversation.
 
 ## Requirements
 
@@ -228,8 +230,11 @@ there; otherwise the bot lists the folders and holds your messages until you
 pick one. `/cwd` changes it later (and starts a new conversation). Writes are
 confined to the topic's folder.
 
-Idle conversations stop their Claude process after 30 minutes and resume on the
-next message. Conversations survive restarts (`state/sessions.json`).
+Idle conversations stop their Claude process after 30 minutes. The next message
+after that doesn't just carry on: the bot holds it and asks whether to continue
+that conversation, switch to another one from the list or start a new one, since
+every message to a long conversation re-sends all of it. Conversations survive
+restarts (`state/sessions.json`).
 
 ### Past conversations
 
@@ -259,7 +264,8 @@ detached, like a long test suite or a dev server, keeps running, and the next
 message brings Claude back into the same container. The bot removes containers
 with nothing left running in them, on idle and when it starts. Claude is told to
 start long jobs detached (`setsid nohup … &`), since commands it runs in the
-foreground stop with it.
+foreground stop with it, and to wait for them in one background command instead
+of checking on them over and over (each check re-sends the whole conversation).
 
 `./containers.sh` lists them with their limits and current use (so does
 `/server`, in the chat). Containers are named `cot-<topic or folder>-<topic id>`, so `docker ps` shows
@@ -352,6 +358,7 @@ Issues and pull requests are welcome. The code is small:
 | `cot/permissions.py` | Permission prompts as buttons                              |
 | `cot/jail.py`        | Hook that keeps file writes inside the working folder     |
 | `cot/usage.py`       | Plan usage for `/usage`                                    |
+| `cot/usagelog.py`    | Per-turn log of cost and plan usage (`state/usage.jsonl`) |
 | `cot/uploads.py`, `cot/tg_tools.py` | Files from and to Telegram                  |
 | `cot/store.py`, `cot/config.py`     | Saved conversations, settings               |
 
