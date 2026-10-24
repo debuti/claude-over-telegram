@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import secrets
 import time
 from pathlib import Path
 
@@ -17,10 +18,11 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, container, history, permissions, server, uploads, usage, usagelog
+from . import __version__, container, costguard, history, permissions, server, uploads, usage, usagelog
 from .config import Config
 from .output import TelegramOutput
-from .session import Session, idle_disconnect, transcript_cost
+from .render import esc
+from .session import Session, idle_disconnect, transcript_context, transcript_cost
 from .store import ConvState, Key, Store
 
 log = logging.getLogger(__name__)
@@ -73,7 +75,8 @@ class Bot:
         self.typing: dict[Key, asyncio.Task] = {}
         self.albums: dict[str, uploads.AlbumCollector] = {}
         # Messages sent to a topic before it has a folder; delivered once one is picked.
-        self.held: dict[Key, list[tuple[str, list[int]]]] = {}
+        self.no_folder: dict[Key, list[tuple[str, list[int]]]] = {}
+        self.ttl = costguard.cache_ttl(cfg)
         self.usage_log = usagelog.UsageLog(cfg.state_dir / "usage.jsonl", cfg.cli_path or container.bundled_cli())
         self.app = (
             Application.builder()
@@ -179,8 +182,12 @@ class Bot:
                 env["COT_MOUNTS"] = "\n".join(mounts)
             if self.cfg.docker_path:
                 env["COT_PATH"] = self.cfg.docker_path
-            return {"cli_path": self.cli_path, "cli_env": env, "sandbox_bash": False}
-        return {"cli_path": self.cfg.cli_path, "cli_env": {}, "sandbox_bash": self.cfg.sandbox_bash}
+            return {"cli_path": self.cli_path, "cli_env": {**env, **self._ttl_env()}, "sandbox_bash": False}
+        return {"cli_path": self.cfg.cli_path, "cli_env": self._ttl_env(), "sandbox_bash": self.cfg.sandbox_bash}
+
+    def _ttl_env(self) -> dict[str, str]:
+        """An explicit CACHE_TTL goes to the CLI too, so the bot's estimates match its cache."""
+        return {"CLAUDE_CODE_PROMPT_CACHE_TTL": self.cfg.cache_ttl} if self.cfg.cache_ttl != "auto" else {}
 
     def _session(self, key: Key) -> Session:
         sess = self.sessions.get(key)
@@ -195,6 +202,7 @@ class Bot:
             on_state=lambda st: self.store.put(key, st),
             default_mode=self.cfg.permission_mode,
             compact_at=self.cfg.compact_at,
+            ttl=self.ttl,
             **self._runner(Path(state.cwd)),
         )
         sess.on_delivered = lambda ids: self._acknowledge(key, ids)
@@ -238,29 +246,34 @@ class Bot:
             await asyncio.sleep(4)
         self.typing.pop(key, None)
 
-    async def _submit(self, key: Key, text: str, ids: list[int] | None = None) -> None:
+    async def _submit(self, key: Key, text: str, ids: list[int] | None = None, check: bool = True) -> None:
+        """Hand a message to the conversation, unless a warning holds it back first.
+
+        check=False delivers without asking: for messages the user already decided about.
+        """
         if not self._assigned(key):
-            first = key not in self.held
-            self.held.setdefault(key, []).append((text, ids or []))
+            first = key not in self.no_folder
+            self.no_folder.setdefault(key, []).append((text, ids or []))
             if first:
                 await self._folder_picker(
                     key, "Pick the folder for this topic; your message goes to Claude right after:"
                 )
             return
         state = self._state(key)
-        if state.parked or self._asleep(key):
-            # Delivered once the user picks where they go (that conversation, another, a new one).
-            first = not state.parked
-            state.parked.append({"text": text, "ids": ids or []})
+        if state.held:  # a warning is already waiting for an answer: this one waits with it
+            state.held.append({"text": text, "ids": ids or []})
             self.store.put(key, state)
-            if first:
-                await self._ask_wake(key)
+            return
+        if check and self._should_hold(key):
+            state.held.append({"text": text, "ids": ids or []})
+            self.store.put(key, state)
+            await self._ask_hold(key)
             return
         sess = self._session(key)
         await sess.send(text, ids)
         self._ensure_typing(key, sess)
 
-    def _asleep(self, key: Key) -> bool:
+    def _should_hold(self, key: Key) -> bool:
         """A conversation whose Claude stopped for lack of use: where its next message goes is asked."""
         state = self._state(key)
         sess = self.sessions.get(key)
@@ -268,70 +281,124 @@ class Bot:
             return False
         return time.time() - state.last_active >= idle_disconnect()
 
-    async def _ask_wake(self, key: Key) -> None:
-        """The wake picker; without it nothing would deliver the parked messages, so they go on."""
+    async def _ask_hold(self, key: Key) -> None:
+        """The warning for held messages; without it nothing would deliver them, so they go on."""
         try:
-            await self._wake_picker(key)
+            sent = await self._hold_prompt(key)
         except Exception:
-            log.exception("wake picker failed")
-            state = self._state(key)
-            state.last_active = time.time()
-            self.store.put(key, state)
-            await self._unpark(key)
+            log.exception("hold prompt failed")
+            sent = False
+        if not sent:
+            await self._release(key)
 
-    async def _wake_picker(self, key: Key) -> None:
+    async def _hold_prompt(self, key: Key) -> bool:
         state = self._state(key)
         sessions = await history.recent(state.cwd)
-        buttons = [
-            InlineKeyboardButton(str(i), callback_data=f"wake:{s.session_id}") for i, s in enumerate(sessions, 1)
-        ]
-        rows = [buttons[i : i + 5] for i in range(0, len(buttons), 5)]
-        rows.append(
-            [
-                InlineKeyboardButton("▶️ Continue this one", callback_data=f"wake:{state.session_id}"),
-                InlineKeyboardButton("🆕 New one", callback_data="wake:new"),
-            ]
-        )
+        rows = [[(str(i), f"r:{s.session_id}") for i, s in enumerate(sessions, 1)]]
+        rows = [rows[0][i : i + 5] for i in range(0, len(rows[0]), 5)]
+        rows.append([("▶️ Continue this one", "continue"), ("🆕 New one", "new")])
         # Its cache has expired, or the restarted process misses it: the next message re-sends
         # the whole context at full price.
-        rows.append([InlineKeyboardButton("🗜 Compact it and continue", callback_data="wake:compact")])
+        rows.append([("🗜 Compact it and continue", "compact")])
         idle = f" (last used {history.ago(state.last_active)})" if state.last_active else ""
         footer = (
             f"💤 This conversation was asleep{idle}. Continue it, pick another one or start a new one: "
             "your message goes there right after."
         )
         text = history.render(sessions, state.session_id, self._where(key), footer)
-        await self._output(key).send_html(text, reply_markup=InlineKeyboardMarkup(rows))
+        return await self._prompt(key, "wake", text, rows)
 
-    async def _wake(self, key: Key, choice: str) -> None:
+    async def _on_prompt(self, key: Key, kind: str, action: str) -> None:
+        """A button of the live warning was tapped (its buttons are already gone)."""
         state = self._state(key)
-        if not state.parked:  # an old picker, already answered
-            await self._output(key).notice("Nothing is waiting for that picker any more.")
-            return
-        if choice == "new":
-            await self._new(key)
-        elif choice == "compact":
-            state.last_active = time.time()
-            self._session(key).compact_next = True
-            self.store.put(key, state)
-        elif choice == state.session_id:
-            state.last_active = time.time()
-            self.store.put(key, state)
-            await self._output(key).notice("▶️ Continuing this conversation")
-        else:
-            await self._resume(key, choice)
-            if self._state(key).session_id != choice:  # it could not be resumed: ask again
-                if self._state(key).parked:
-                    await self._ask_wake(key)
-                return
-        await self._unpark(key)
+        if kind == "wake":
+            if action == "new":
+                await self._new(key)
+            elif action == "compact":
+                self._session(key).compact_next = True
+            elif action.startswith("r:") and action[2:] != state.session_id:
+                await self._resume(key, action[2:])
+                if self._state(key).session_id != action[2:]:  # it could not be resumed: ask again
+                    await self._ask_hold(key)
+                    return
+        await self._release(key)
 
-    async def _unpark(self, key: Key) -> None:
+    async def _release(self, key: Key) -> None:
+        """Deliver the held messages where the conversation now stands, without asking again."""
+        await self._drop_prompt(key)
         state = self._state(key)
-        parked, state.parked = state.parked, []
+        held, state.held = state.held, []
         self.store.put(key, state)
-        for item in parked:
-            await self._submit(key, item["text"], item["ids"])
+        for item in held:
+            await self._submit(key, item["text"], item["ids"], check=False)
+
+    async def _prompt(
+        self, key: Key, kind: str, html: str, rows: list[list[tuple[str, str]]], silent: bool = False
+    ) -> bool:
+        """Send a warning with buttons (label, action); False if it could not be sent.
+
+        Its buttons carry a fresh nonce (guard:<nonce>:<action>): only the conversation's latest
+        warning answers taps, and a new one takes the buttons off the one before.
+        """
+        await self._drop_prompt(key)
+        nonce = secrets.token_hex(3)
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(label, callback_data=f"guard:{nonce}:{action}") for label, action in row]
+             for row in rows if row]
+        )
+        msg_id = await self._output(key).send_html(html, reply_markup=markup, silent=silent)
+        if msg_id is None:
+            return False
+        state = self._state(key)
+        state.prompt = {"nonce": nonce, "msg_id": msg_id, "kind": kind}
+        self.store.put(key, state)
+        return True
+
+    async def _drop_prompt(self, key: Key) -> None:
+        """Take the buttons off the live warning, if any: it no longer decides anything."""
+        state = self._state(key)
+        if not state.prompt:
+            return
+        msg_id, state.prompt = state.prompt["msg_id"], None
+        self.store.put(key, state)
+        try:
+            await self.app.bot.edit_message_reply_markup(key[0], msg_id, reply_markup=None)
+        except TelegramError as e:  # deleted, too old…
+            log.debug("could not take the buttons off: %s", e)
+
+    async def _on_guard(self, key: Key, query, rest: str) -> None:
+        nonce, _, action = rest.partition(":")
+        state = self._state(key)
+        if not state.prompt or state.prompt["nonce"] != nonce:
+            await query.answer("This prompt has expired")
+            try:
+                await query.edit_message_reply_markup(None)
+            except TelegramError:
+                pass
+            return
+        await query.answer()
+        kind = state.prompt["kind"]
+        state.prompt = None
+        self.store.put(key, state)
+        # The warning keeps what was picked, in place of its buttons.
+        markup = query.message and query.message.reply_markup
+        buttons = [b for row in markup.inline_keyboard for b in row] if markup else []
+        label = next((b.text for b in buttons if b.callback_data == query.data), action)
+        try:
+            await query.edit_message_text(
+                f"{query.message.text_html}\n\n→ {esc(label)}", parse_mode="HTML", disable_web_page_preview=True
+            )
+        except Exception as e:
+            log.debug("could not mark the choice: %s", e)
+            try:
+                await query.edit_message_reply_markup(None)
+            except TelegramError:
+                pass
+        try:
+            await self._on_prompt(key, kind, action)
+        except Exception:
+            log.exception("prompt action %s:%s failed", kind, action)
+            await self._release(key)  # never leave the messages stuck
 
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
@@ -377,8 +444,17 @@ class Bot:
                 n = len(state.pending)
                 await self._output(key).notice(f"↩️ Passing on {n} message{'s' * (n > 1)} sent before the restart")
                 self._session(key)
-            if state.parked and self._assigned(key):
-                await self._ask_wake(key)
+            if state.session_id and (not state.last_api_at or not state.context_tokens):
+                await self._backfill(key, state)
+            if state.held and self._assigned(key):
+                await self._ask_hold(key)
+
+    async def _backfill(self, key: Key, state: ConvState) -> None:
+        """Context size and last call time from the transcript, for state that lacks them."""
+        context, mtime = await asyncio.to_thread(transcript_context, state.session_id)
+        state.context_tokens = state.context_tokens or context
+        state.last_api_at = state.last_api_at or mtime
+        self.store.put(key, state)
 
     async def _cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
@@ -434,15 +510,20 @@ class Bot:
             await sess.close()
         # A new directory means a new conversation; display preferences carry over.
         state = ConvState(cwd=str(path), mode=old.mode, model=old.model, tools=old.tools, title=old.title)
-        state.parked = old.parked  # the new conversation gets them
+        state.held = old.held  # the new conversation gets them
         self.store.put(key, state)
+        if old.prompt:
+            try:
+                await self.app.bot.edit_message_reply_markup(key[0], old.prompt["msg_id"], reply_markup=None)
+            except TelegramError:
+                pass
         msg = f"📁 Working in {self._rel(state.cwd)} (new conversation)"
         if any(s.state.cwd == state.cwd for k, s in self.sessions.items() if k != key):
             msg += "\n⚠️ Another conversation is also working in this directory."
         await self._output(key).notice(msg)
-        for text, ids in self.held.pop(key, []):
+        for text, ids in self.no_folder.pop(key, []):
             await self._submit(key, text, ids)
-        await self._unpark(key)
+        await self._release(key)
 
     async def _on_topic_created(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """A new topic named like a folder of the workdir works there; otherwise ask for one."""
@@ -452,7 +533,7 @@ class Bot:
         match = next((n for n in self._subdirs() if n.lower() == name.lower()), None)
         if match:
             await self._set_cwd(key, match)
-        elif key not in self.held:
+        elif key not in self.no_folder:
             await self._ready(key)
 
     async def _on_topic_edited(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -471,7 +552,7 @@ class Bot:
         if not await self._ready(key):
             return
         await self._new(key)
-        await self._unpark(key)
+        await self._release(key)
 
     async def _new(self, key: Key) -> None:
         sess = self.sessions.pop(key, None)
@@ -481,6 +562,7 @@ class Bot:
         state.session_id = None
         state.cost_usd = 0.0
         state.context_tokens = state.after_compact = 0
+        state.last_api_at = 0.0
         self.store.put(key, state)
         await self._output(key).notice(f"🆕 New conversation in {state.cwd}")
 
@@ -495,7 +577,7 @@ class Bot:
             found = history.find(sessions, ctx.args[0])
             if found:
                 await self._resume(key, found.session_id)
-                await self._unpark(key)
+                await self._release(key)
             else:
                 await self._output(key).notice(f"⚠️ No conversation {ctx.args[0]} here; /list shows them.")
             return
@@ -514,8 +596,6 @@ class Bot:
         out = self._output(key)
         state = self._state(key)
         if session_id == state.session_id:
-            state.last_active = time.time()  # so a parked message goes to it, not to a new picker
-            self.store.put(key, state)
             await out.notice("Already in that conversation.")
             return
         if any(s.state.session_id == session_id for k, s in self.sessions.items() if k != key):
@@ -530,7 +610,8 @@ class Bot:
             await sess.close()
         state.session_id = session_id
         state.cost_usd = await asyncio.to_thread(transcript_cost, session_id)
-        state.context_tokens = state.after_compact = 0  # known from its first answer
+        state.context_tokens, state.last_api_at = await asyncio.to_thread(transcript_context, session_id)
+        state.after_compact = 0
         state.last_active = time.time()
         self.store.put(key, state)
         await self._output(key).notice(
@@ -593,6 +674,12 @@ class Bot:
         key = self._key(update)
         sess = self.sessions.get(key)
         running, dropped = await sess.stop() if sess else (False, 0)
+        state = self._state(key)
+        if state.held:  # held back by a warning: dropped too
+            dropped += len(state.held)
+            state.held = []
+            self.store.put(key, state)
+        await self._drop_prompt(key)
         if not running:
             # When a turn was running, its end reports "Stopped" itself.
             msg = f"🛑 Dropped {dropped} queued message(s)" if dropped else "Nothing to stop"
@@ -702,17 +789,18 @@ class Bot:
             await query.answer()
             await query.edit_message_reply_markup(None)
             await self._set_cwd(key, rest)
-        elif kind in ("tools", "model", "mode", "resume", "wake") and not await self._ready(key):
+        elif kind == "wake":  # the wake picker of 2.12 and before
+            await query.answer("This prompt has expired")
+            await query.edit_message_reply_markup(None)
+        elif kind in ("tools", "model", "mode", "resume", "guard") and not await self._ready(key):
             await query.answer()
         elif kind == "resume":
             await query.answer()
             await query.edit_message_reply_markup(None)
             await self._resume(key, rest)
-            await self._unpark(key)
-        elif kind == "wake":
-            await query.answer()
-            await query.edit_message_reply_markup(None)
-            await self._wake(key, rest)
+            await self._release(key)
+        elif kind == "guard":
+            await self._on_guard(key, query, rest)
         elif kind == "tools":
             await query.answer()
             await query.edit_message_reply_markup(None)

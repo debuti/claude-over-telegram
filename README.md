@@ -23,7 +23,9 @@ and only the Telegram users you allow can talk to it.
 - Writes confined to the workdir (and optionally Bash too, through a sandbox).
 - `/usage` shows your plan limits, `/cost` the API-price estimate of a conversation.
   Every turn is logged to `state/usage.jsonl` with its cost and the plan limits
-  before and after it; `python -m cot.usagelog` sums it up per conversation.
+  before and after it, and with how the prompt cache stood (idle time, what the
+  first call read from the cache and wrote to it, `cache_break` when the cache was
+  lost before its TTL); `python -m cot.usagelog` sums it up per conversation.
 
 ## Requirements
 
@@ -101,6 +103,7 @@ All settings live in `.env` next to the code (see `.env.example`):
 | `ALLOWED_USER_IDS` | (empty)    | Comma-separated Telegram user ids allowed to use the bot        |
 | `PERMISSION_MODE`  | `auto`     | Initial permission mode: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
 | `AUTO_COMPACT_TOKENS` | `200000` | Context size that compacts a conversation before its next message; `0` turns it off |
+| `CACHE_TTL`        | `auto`     | Prompt cache lifetime: `auto` (1 hour on a subscription, 5 minutes with an API key), `5m` or `1h` (passed to Claude too) |
 | `SANDBOX_DOCKER`   | `true`     | Run each conversation's Claude in its own container (see [Confinement](#confinement)) |
 | `DOCKER_CPUS`      | `2`        | CPUs each container may use                                     |
 | `DOCKER_MEMORY`    | `4g`       | Memory each container may use                                   |
@@ -366,10 +369,14 @@ Issues and pull requests are welcome. The code is small:
 | `cot/jail.py`        | Hook that keeps file writes inside the working folder     |
 | `cot/usage.py`       | Plan usage for `/usage`                                    |
 | `cot/usagelog.py`    | Per-turn log of cost and plan usage (`state/usage.jsonl`) |
+| `cot/costguard.py`   | What the next message costs: cache TTL, cold/warm estimates |
 | `cot/uploads.py`, `cot/tg_tools.py` | Files from and to Telegram                  |
 | `cot/store.py`, `cot/config.py`     | Saved conversations, settings               |
 
-Run `ruff check .` before sending changes; CI runs it on Python 3.10 and 3.13.
+Run `ruff check .` and `pytest` (`pip install pytest pytest-asyncio`) before sending
+changes; CI runs both on Python 3.10 and 3.13. `COT_DEBUG_TTL_SECONDS` makes the bot
+assume a shorter cache lifetime (Claude's own is untouched), to try out what depends
+on it in minutes.
 
 ## Ideas for later
 

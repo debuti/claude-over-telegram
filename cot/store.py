@@ -22,16 +22,23 @@ class ConvState:
     context_tokens: int = 0  # context size at Claude's last answer
     after_compact: int = 0  # context size right after the last compaction
     last_active: float = 0.0  # epoch seconds of Claude's last turn or output
+    # Epoch seconds of the main thread's last API call: the prompt cache lives on from it.
+    # 0 in state from before 2.13 (then the transcript's last write stands in).
+    last_api_at: float = 0.0
     title: str | None = None  # topic name, known when the topic is created or renamed
     # Messages not yet handed to Claude ({"text", "ids"}), so a restart doesn't lose them.
     pending: list[dict] = field(default_factory=list)
-    # Messages to a conversation that went to sleep, until the user picks where they go.
-    parked: list[dict] = field(default_factory=list)
+    # Messages held back by a warning ({"text", "ids"}) until the user picks what happens to them.
+    held: list[dict] = field(default_factory=list)
+    # The warning whose buttons are live: {"nonce", "msg_id", "kind"}; at most one per conversation.
+    prompt: dict | None = None
 
 
 def _migrate(v: dict) -> dict:
     if "verbose" in v:  # <= 0.4: a boolean for showing tool results
         v["tools"] = "full" if v.pop("verbose") else "calls"
+    if "parked" in v:  # <= 2.12: messages to a sleeping conversation
+        v["held"] = v.pop("parked")
     return v
 
 

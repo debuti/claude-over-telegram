@@ -30,7 +30,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from . import container, permissions, tg_tools
+from . import container, costguard, permissions, tg_tools
 from .jail import make_hook
 from .output import TelegramOutput
 from .store import ConvState
@@ -82,6 +82,33 @@ def _transcript_exists(session_id: str) -> bool:
     return bool(_transcripts(session_id))
 
 
+def transcript_context(session_id: str) -> tuple[int, float]:
+    """(context tokens at the last answer, epoch seconds of the transcript's last write).
+
+    For a resumed conversation or state saved before 2.13, which don't know them. The context
+    is what the main thread's last call sent (subagents run in their own context). (0, 0.0)
+    if the transcript can't be read: its format is the CLI's, not a promise.
+    """
+    context, mtime = 0, 0.0
+    try:
+        for path in _transcripts(session_id):
+            mtime = max(mtime, path.stat().st_mtime)
+            with path.open(errors="ignore") as f:
+                for line in f:
+                    if '"assistant"' not in line or '"usage"' not in line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue
+                    usage = (e.get("message") or {}).get("usage") if e.get("type") == "assistant" else None
+                    if usage and not e.get("isSidechain"):
+                        context = sum(usage.get(k) or 0 for k in TOKEN_KINDS[:3])
+    except Exception:
+        log.warning("could not read the transcript of %s", session_id, exc_info=True)
+    return context, mtime
+
+
 def transcript_cost(session_id: str) -> float:
     """What the CLI says the session has cost so far: the total it resumes counting from."""
     cost = 0.0
@@ -108,6 +135,7 @@ class Session:
         cli_env: dict[str, str],
         sandbox_bash: bool,
         compact_at: int = 0,
+        ttl: int = 3600,
     ):
         self.state = state
         self.out = out
@@ -116,6 +144,7 @@ class Session:
         self._default_mode = default_mode
         self._cli_path = cli_path
         self._cli_env = cli_env
+        self._ttl = ttl  # seconds the prompt cache lives (costguard.cache_ttl)
         self._compact_at = compact_at  # context size (tokens) that compacts before the next turn; 0: never
         self.compact_next = False  # compact before the next turn whatever the size
         self._compacting = False
@@ -142,6 +171,8 @@ class Session:
         self._tasks: set[str] = set()  # background tasks still running
         self._turn_ok = False  # the last turn ended without an error or being stopped
         self._logging: set[asyncio.Task] = set()
+        self._fresh = False  # no turn yet in this Claude process
+        self._probe: dict | None = None  # the running turn's cache measurements, for the usage log
 
     def _set_waiting(self, value: bool) -> None:
         self.waiting = value
@@ -192,6 +223,7 @@ class Session:
             client = ClaudeSDKClient(self._options())
             await client.connect()
         self._client = client
+        self._fresh = True
         self._reader = asyncio.create_task(self._read(client))
 
     def start(self) -> None:
@@ -399,8 +431,7 @@ class Session:
         assert self._client
         self._turn_done = asyncio.get_running_loop().create_future()
         self.state.last_active = time.time()
-        if self.on_turn_start:
-            self.on_turn_start()
+        self._begin_turn()
         await self._client.query("\n\n".join(item["text"] for item in items))
         # Claude has them: no longer pending, and the user sees they arrived.
         self.state.pending = [p for p in self.state.pending if p not in items]
@@ -408,6 +439,42 @@ class Session:
         if self.on_delivered:
             await self.on_delivered([i for item in items for i in item["ids"]])
         await self._turn_done
+
+    def _begin_turn(self) -> None:
+        """Note how the cache should stand, to check against what the turn's first call reports."""
+        now, last, context = time.time(), self.state.last_api_at, self.state.context_tokens
+        cold = not last or costguard.is_cold(now, last, self._ttl)
+        self._probe = {
+            "idle_s": round(now - last) if last else None,
+            "fresh_process": self._fresh,
+            "ttl_s": self._ttl,
+            "context_before": context,
+            "just_compacted": self._measure_compacted,  # a new summary: written, not read
+            "first_call": None,
+            "estimated": round(costguard.estimate(context, cold, self._ttl).equivalent) if context else None,
+        }
+        self._fresh = False
+        if self.on_turn_start:
+            self.on_turn_start()
+
+    def _probe_result(self) -> dict:
+        """The probe for the usage log, flagging a cache that broke although it should have held."""
+        probe, self._probe = self._probe or {}, None
+        first, idle = probe.pop("first_call", None), probe.get("idle_s")
+        broke = bool(
+            first
+            and idle is not None
+            and idle < probe.get("ttl_s", self._ttl)
+            and probe.get("context_before")
+            and not probe.get("just_compacted")
+            and first["write"] > first["read"]
+        )
+        if broke:
+            log.warning(
+                "cache break: %ss idle (TTL %ss, fresh process: %s), first call wrote %s and read %s tokens",
+                idle, probe.get("ttl_s"), probe.get("fresh_process"), first["write"], first["read"],
+            )
+        return {**probe, "first_call": first, "cache_break": broke}
 
     async def _read(self, client: ClaudeSDKClient) -> None:
         """Forward all of Claude's output for as long as this process lives."""
@@ -419,8 +486,7 @@ class Session:
                     continue
                 if not self.busy:  # a turn Claude started on its own
                     self.busy = True
-                    if self.on_turn_start:
-                        self.on_turn_start()
+                    self._begin_turn()
                     if self.on_active:
                         self.on_active()
                 await self._handle(msg)
@@ -456,6 +522,14 @@ class Session:
             if not nested and msg.usage:
                 u = msg.usage
                 self.state.context_tokens = sum(u.get(k) or 0 for k in TOKEN_KINDS[:3])
+                # The main thread's cache lives on from its last call (subagents have their own).
+                self.state.last_api_at = time.time()
+                if self._probe is not None and self._probe["first_call"] is None:
+                    self._probe["first_call"] = {
+                        "read": u.get("cache_read_input_tokens") or 0,
+                        "write": u.get("cache_creation_input_tokens") or 0,
+                        "input": u.get("input_tokens") or 0,
+                    }
                 if self._measure_compacted:
                     self.state.after_compact, self._measure_compacted = self.state.context_tokens, False
             if not nested and msg.model and not msg.model.startswith("<"):
@@ -478,7 +552,7 @@ class Session:
             if msg.total_cost_usd is not None:
                 self.last_turn_cost = max(msg.total_cost_usd - self.state.cost_usd, 0.0)
                 self.state.cost_usd = msg.total_cost_usd
-                self._on_state(self.state)
+            self._on_state(self.state)  # with the context size and last call time
             if self.on_turn_end:
                 u = msg.usage or {}
                 entry = {
@@ -488,6 +562,8 @@ class Session:
                     "seconds": round(msg.duration_ms / 1000),
                     "tokens": {k: u.get(k) for k in TOKEN_KINDS},
                     "by": "compact" if self._compacting else "user" if self._turn_done else "claude",
+                    "context_tokens": self.state.context_tokens,
+                    **self._probe_result(),
                 }
                 task = asyncio.create_task(self.on_turn_end(entry))
                 self._logging.add(task)

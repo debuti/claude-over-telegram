@@ -57,7 +57,7 @@ class TelegramOutput:
                 await asyncio.sleep(2**attempt)
         return await fn(*args, **kwargs)
 
-    async def send_html(self, text: str, reply_markup=None) -> int | None:
+    async def send_html(self, text: str, reply_markup=None, silent: bool = False) -> int | None:
         try:
             msg = await self._call(
                 self.bot.send_message,
@@ -67,6 +67,7 @@ class TelegramOutput:
                 message_thread_id=self.thread_id,
                 disable_web_page_preview=True,
                 reply_markup=reply_markup,
+                disable_notification=silent,
             )
         except BadRequest as e:
             log.warning("HTML rejected (%s), sending plain text", e)
@@ -77,6 +78,7 @@ class TelegramOutput:
                     html_to_plain(text)[:4096],
                     message_thread_id=self.thread_id,
                     reply_markup=reply_markup,
+                    disable_notification=silent,
                 )
             except TelegramError:
                 log.exception("send failed")

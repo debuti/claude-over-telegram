@@ -5,3 +5,10 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["F", "E", "W", "B", "I"]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
