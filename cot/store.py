@@ -18,7 +18,7 @@ class ConvState:
     mode: str | None = None
     model: str | None = None
     tools: str = "hidden"  # hidden | calls | full (calls plus their results)
-    cost_usd: float = 0.0  # estimated, accumulated over the whole conversation
+    cost_usd: float = 0.0  # estimated, the CLI's running total for session_id
     title: str | None = None  # topic name, known when the topic is created or renamed
     # Messages not yet handed to Claude ({"text", "ids"}), so a restart doesn't lose them.
     pending: list[dict] = field(default_factory=list)

@@ -7,6 +7,7 @@ which would otherwise wait unread and come out as the reply to the next message.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -49,9 +50,27 @@ GATHER_SECONDS = 3.0
 OnState = Callable[[ConvState], None]
 
 
-def _transcript_exists(session_id: str) -> bool:
+def _transcripts(session_id: str) -> list[Path]:
     config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-    return any((config_dir / "projects").glob(f"*/{session_id}.jsonl"))
+    return list((config_dir / "projects").glob(f"*/{session_id}.jsonl"))
+
+
+def _transcript_exists(session_id: str) -> bool:
+    return bool(_transcripts(session_id))
+
+
+def transcript_cost(session_id: str) -> float:
+    """What the CLI says the session has cost so far: the total it resumes counting from."""
+    cost = 0.0
+    for path in _transcripts(session_id):
+        with path.open(errors="ignore") as f:
+            for line in f:
+                if '"cost-state"' in line:
+                    try:
+                        cost = json.loads(line).get("totalCostUSD", cost)
+                    except ValueError:
+                        pass
+    return cost
 
 
 class Session:
@@ -84,7 +103,6 @@ class Session:
         self.waiting = False  # blocked on a permission prompt
         self.model: str | None = None  # model actually answering, as reported by Claude
         self.last_turn_cost: float | None = None
-        self._proc_cost = 0.0  # total_cost_usd is cumulative per CLI process
         self._stopping = False
         self._reader: asyncio.Task | None = None
         self._turn_done: asyncio.Future | None = None  # the user's turn, until its result
@@ -136,7 +154,6 @@ class Session:
             client = ClaudeSDKClient(self._options())
             await client.connect()
         self._client = client
-        self._proc_cost = 0.0
         self._reader = asyncio.create_task(self._read(client))
 
     def start(self) -> None:
@@ -336,10 +353,11 @@ class Session:
             if msg.session_id and msg.session_id != self.state.session_id:
                 self.state.session_id = msg.session_id
                 self._on_state(self.state)
+            # total_cost_usd covers the whole session, earlier processes included (a resume
+            # carries the total over), so it is the conversation's cost as it stands.
             if msg.total_cost_usd is not None:
-                self.last_turn_cost = max(msg.total_cost_usd - self._proc_cost, 0.0)
-                self._proc_cost = msg.total_cost_usd
-                self.state.cost_usd += self.last_turn_cost
+                self.last_turn_cost = max(msg.total_cost_usd - self.state.cost_usd, 0.0)
+                self.state.cost_usd = msg.total_cost_usd
                 self._on_state(self.state)
             if self._stopping or (msg.terminal_reason or "").startswith("aborted"):
                 await self.out.notice("🛑 Stopped")

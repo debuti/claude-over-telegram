@@ -19,7 +19,7 @@ from telegram.ext import (
 from . import __version__, container, history, permissions, server, uploads, usage
 from .config import Config
 from .output import TelegramOutput
-from .session import Session
+from .session import Session, transcript_cost
 from .store import ConvState, Key, Store
 
 log = logging.getLogger(__name__)
@@ -424,7 +424,7 @@ class Bot:
         if sess:
             await sess.close()
         state.session_id = session_id
-        state.cost_usd = 0.0
+        state.cost_usd = await asyncio.to_thread(transcript_cost, session_id)
         self.store.put(key, state)
         await self._output(key).notice(
             f"⏪ Resumed: {history.title(info)}\n"
