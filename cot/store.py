@@ -20,10 +20,13 @@ class ConvState:
     tools: str = "hidden"  # hidden | calls | full (calls plus their results)
     cost_usd: float = 0.0  # estimated, the CLI's running total for session_id
     context_tokens: int = 0  # context size at Claude's last answer
+    after_compact: int = 0  # context size right after the last compaction
     last_active: float = 0.0  # epoch seconds of Claude's last turn or output
     title: str | None = None  # topic name, known when the topic is created or renamed
     # Messages not yet handed to Claude ({"text", "ids"}), so a restart doesn't lose them.
     pending: list[dict] = field(default_factory=list)
+    # Messages to a conversation that went to sleep, until the user picks where they go.
+    parked: list[dict] = field(default_factory=list)
 
 
 def _migrate(v: dict) -> dict:

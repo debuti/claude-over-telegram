@@ -231,12 +231,16 @@ there; otherwise the bot lists the folders and holds your messages until you
 pick one. `/cwd` changes it later (and starts a new conversation). Writes are
 confined to the topic's folder.
 
-Idle conversations stop their Claude process after 30 minutes. The next message
+Idle conversations stop their Claude process after 55 minutes, just before the
+subscription's 1-hour prompt cache expires (30 minutes with an `ANTHROPIC_API_KEY`,
+whose cache lasts 5), or once the background commands Claude is waiting for end
+(6 hours at most). The next message
 after that doesn't just carry on: the bot holds it and asks whether to continue
 that conversation, compact it and continue, switch to another one from the list
 or start a new one, since every message to a long conversation re-sends all of
 it. A conversation whose context passes `AUTO_COMPACT_TOKENS` (200k) is compacted
-(`/compact`) before its next message. Conversations survive
+(`/compact`) before its next message, or before its process stops, while the cache
+still holds it. Conversations survive
 restarts (`state/sessions.json`).
 
 ### Past conversations

@@ -49,8 +49,8 @@ class UsageLog:
             return limits
 
     def turn_started(self, key: object) -> None:
-        if key not in self._before:
-            self._before[key] = asyncio.create_task(self._limits())
+        # Replaces the reading of a turn that failed without a result.
+        self._before[key] = asyncio.create_task(self._limits())
 
     async def turn_ended(self, key: object, entry: dict) -> None:
         before = self._before.pop(key, None)

@@ -16,10 +16,14 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from claude_agent_sdk import (
+    TERMINAL_TASK_STATUSES,
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    TaskNotificationMessage,
+    TaskStartedMessage,
+    TaskUpdatedMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -46,12 +50,26 @@ APPEND_PROMPT = (
     "run_in_background and `while kill -0 PID 2>/dev/null; do sleep 15; done; tail -n 50 job.log`, "
     "and end your turn meanwhile; for one that runs for hours, tell the user how to ask you later."
 )
-IDLE_DISCONNECT = 30 * 60  # stop the idle Claude process; the next message resumes it
+# Background tasks (a command run with run_in_background) keep the process up until they end,
+# this long at most: the process is what tells Claude they ended.
+TASK_WAIT = 6 * 60 * 60
 # Telegram splits long texts into several messages: wait this long after the last one
 # so they reach Claude as a single turn. Messages queued during a turn merge too.
 GATHER_SECONDS = 3.0
 
 OnState = Callable[[ConvState], None]
+
+
+def idle_disconnect() -> int:
+    """Seconds without activity after which the Claude process stops; the next message resumes it.
+
+    Subscription logins get a 1-hour prompt cache (API keys a 5-minute one), so the process lives
+    up to just before it expires: until then the next message reads the context from the cache,
+    and a long one can still compact cheaply before the process stops.
+    """
+    return 30 * 60 if os.environ.get("ANTHROPIC_API_KEY") else 55 * 60
+
+
 TOKEN_KINDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 
 
@@ -101,7 +119,6 @@ class Session:
         self._compact_at = compact_at  # context size (tokens) that compacts before the next turn; 0: never
         self.compact_next = False  # compact before the next turn whatever the size
         self._compacting = False
-        self._after_compact = 0  # context right after the last compaction
         self._measure_compacted = False  # the next answer tells how much compaction left
         # Items are {"text", "ids"}: ids of the Telegram messages, to acknowledge them.
         self._queue: asyncio.Queue[dict] = asyncio.Queue()
@@ -121,6 +138,9 @@ class Session:
         self._reader: asyncio.Task | None = None
         self._turn_done: asyncio.Future | None = None  # the user's turn, until its result
         self._last_activity = time.monotonic()
+        self._tasks: set[str] = set()  # background tasks still running
+        self._turn_ok = False  # the last turn ended without an error or being stopped
+        self._logging: set[asyncio.Task] = set()
 
     def _set_waiting(self, value: bool) -> None:
         self.waiting = value
@@ -164,7 +184,9 @@ class Session:
                 raise
             log.warning("resume of %s failed, starting a new session", self.state.session_id)
             self.state.session_id = None
+            self.state.cost_usd = 0.0
             self.state.context_tokens = 0
+            self.state.after_compact = 0
             self._on_state(self.state)
             client = ClaudeSDKClient(self._options())
             await client.connect()
@@ -269,15 +291,30 @@ class Session:
             except Exception:
                 log.exception("disconnect failed")
             self._client = None
+        self._tasks.clear()
 
     async def _run(self) -> None:
         while True:
+            idle = time.monotonic() - self._last_activity
+            # Claude working on its own (a turn it started, a background task): look again later.
+            timeout = 60 if self.busy or self._tasks else max(idle_disconnect() - idle, 1)
             try:
-                item = await asyncio.wait_for(self._queue.get(), IDLE_DISCONNECT)
+                item = await asyncio.wait_for(self._queue.get(), timeout if self._client else None)
             except asyncio.TimeoutError:
-                # Claude may be working on its own (a turn it started) or just have.
-                if self.busy or time.monotonic() - self._last_activity < IDLE_DISCONNECT:
+                idle = time.monotonic() - self._last_activity
+                if self.busy or idle < idle_disconnect() or (self._tasks and idle < TASK_WAIT):
                     continue
+                if self._alive() and self._needs_compact():
+                    # Now, while the cache still holds the context: once it expires compacting
+                    # reads all of it at full price.
+                    self.busy = True
+                    try:
+                        await self._compact("before it goes to sleep")
+                    except Exception:
+                        log.exception("compaction before sleeping failed")
+                    finally:
+                        self.busy = False
+                        self._stopping = False
                 await self._disconnect()
                 if self._in_docker:
                     await asyncio.to_thread(container.reap, self._container_name())
@@ -292,7 +329,10 @@ class Session:
                     await self._disconnect()
                 if self._client is None:
                     await self._connect()
-                await self._maybe_compact()
+                if self._needs_compact() and not self._stopping:
+                    await self._compact("first")
+                if self._stopping:  # /stop while connecting or compacting: the messages go too
+                    continue
                 await self._turn(items)
             except asyncio.CancelledError:
                 raise
@@ -307,17 +347,19 @@ class Session:
                 self.busy = False
                 self._stopping = False
 
-    async def _maybe_compact(self) -> None:
-        """/compact before the turn when asked to, or when the context has grown past compact_at:
-        every call re-reads the whole context, so a long conversation costs more each message."""
-        size = self.state.context_tokens
+    def _needs_compact(self) -> bool:
+        """Asked to, or the context has grown past compact_at: every call re-reads the whole
+        context, so a long conversation costs more each message."""
         # One that compaction can't bring down much shouldn't compact on every message.
-        floor = max(self._compact_at, 2 * self._after_compact)
-        if not self.compact_next and not (self._compact_at and size >= floor):
-            return
+        floor = max(self._compact_at, 2 * self.state.after_compact)
+        return self.compact_next or bool(self._compact_at and self.state.context_tokens >= floor)
+
+    async def _compact(self, when: str) -> None:
         self.compact_next = False
-        await self.out.notice(f"🗜 Compacting the conversation ({size // 1000}k tokens of context) first…")
+        size = self.state.context_tokens
+        await self.out.notice(f"🗜 Compacting the conversation ({size // 1000}k tokens of context) {when}…")
         self._compacting = True
+        self._turn_ok = False
         try:
             await self._turn([{"text": "/compact", "ids": []}])
         except asyncio.CancelledError:
@@ -331,9 +373,10 @@ class Session:
         finally:
             self._compacting = False
             self._turn_done = None
-        self.state.context_tokens = 0
-        self._measure_compacted = True
-        self._on_state(self.state)
+        if self._turn_ok:  # a failed or stopped one left the context as it was
+            self.state.context_tokens = 0
+            self._measure_compacted = True
+            self._on_state(self.state)
 
     async def _gather(self, first: dict) -> list[dict]:
         """The first message plus everything that follows it in quick succession."""
@@ -367,6 +410,8 @@ class Session:
             async for msg in client.receive_messages():
                 self._last_activity = time.monotonic()
                 self.state.last_active = time.time()  # saved with the turn's result
+                if self._track_task(msg):  # bookkeeping, not a turn
+                    continue
                 if not self.busy:  # a turn Claude started on its own
                     self.busy = True
                     if self.on_turn_start:
@@ -390,6 +435,16 @@ class Session:
                 log.warning("Claude's output ended between turns: %s", e)
                 self.busy = False
 
+    def _track_task(self, msg) -> bool:
+        if isinstance(msg, TaskStartedMessage):
+            self._tasks.add(msg.task_id)
+        elif isinstance(msg, (TaskNotificationMessage, TaskUpdatedMessage)):
+            if msg.status in TERMINAL_TASK_STATUSES:
+                self._tasks.discard(msg.task_id)
+        else:
+            return False
+        return True
+
     async def _handle(self, msg) -> None:
         if isinstance(msg, AssistantMessage):
             nested = msg.parent_tool_use_id is not None
@@ -397,7 +452,7 @@ class Session:
                 u = msg.usage
                 self.state.context_tokens = sum(u.get(k) or 0 for k in TOKEN_KINDS[:3])
                 if self._measure_compacted:
-                    self._after_compact, self._measure_compacted = self.state.context_tokens, False
+                    self.state.after_compact, self._measure_compacted = self.state.context_tokens, False
             if not nested and msg.model and not msg.model.startswith("<"):
                 self.model = msg.model
             for block in msg.content:
@@ -429,8 +484,12 @@ class Session:
                     "tokens": {k: u.get(k) for k in TOKEN_KINDS},
                     "by": "compact" if self._compacting else "user" if self._turn_done else "claude",
                 }
-                asyncio.create_task(self.on_turn_end(entry))
-            if self._stopping or (msg.terminal_reason or "").startswith("aborted"):
+                task = asyncio.create_task(self.on_turn_end(entry))
+                self._logging.add(task)
+                task.add_done_callback(self._logging.discard)
+            stopped = self._stopping or (msg.terminal_reason or "").startswith("aborted")
+            self._turn_ok = not stopped and not msg.is_error
+            if stopped:
                 await self.out.notice("🛑 Stopped")
             elif msg.is_error:
                 detail = "; ".join(msg.errors or []) or msg.subtype

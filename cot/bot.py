@@ -20,7 +20,7 @@ from telegram.ext import (
 from . import __version__, container, history, permissions, server, uploads, usage, usagelog
 from .config import Config
 from .output import TelegramOutput
-from .session import IDLE_DISCONNECT, Session, transcript_cost
+from .session import Session, idle_disconnect, transcript_cost
 from .store import ConvState, Key, Store
 
 log = logging.getLogger(__name__)
@@ -74,9 +74,6 @@ class Bot:
         self.albums: dict[str, uploads.AlbumCollector] = {}
         # Messages sent to a topic before it has a folder; delivered once one is picked.
         self.held: dict[Key, list[tuple[str, list[int]]]] = {}
-        # Messages to a conversation that went to sleep; delivered once the user picks where
-        # they go (that conversation, another one, a new one).
-        self.parked: dict[Key, list[tuple[str, list[int]]]] = {}
         self.usage_log = usagelog.UsageLog(cfg.state_dir / "usage.jsonl", cfg.cli_path or container.bundled_cli())
         self.app = (
             Application.builder()
@@ -249,11 +246,14 @@ class Bot:
                     key, "Pick the folder for this topic; your message goes to Claude right after:"
                 )
             return
-        if key in self.parked or self._asleep(key):
-            first = key not in self.parked
-            self.parked.setdefault(key, []).append((text, ids or []))
+        state = self._state(key)
+        if state.parked or self._asleep(key):
+            # Delivered once the user picks where they go (that conversation, another, a new one).
+            first = not state.parked
+            state.parked.append({"text": text, "ids": ids or []})
+            self.store.put(key, state)
             if first:
-                await self._wake_picker(key)
+                await self._ask_wake(key)
             return
         sess = self._session(key)
         await sess.send(text, ids)
@@ -265,7 +265,18 @@ class Bot:
         sess = self.sessions.get(key)
         if not state.session_id or (sess and (sess.connected or sess.pending)):
             return False
-        return time.time() - state.last_active >= IDLE_DISCONNECT
+        return time.time() - state.last_active >= idle_disconnect()
+
+    async def _ask_wake(self, key: Key) -> None:
+        """The wake picker; without it nothing would deliver the parked messages, so they go on."""
+        try:
+            await self._wake_picker(key)
+        except Exception:
+            log.exception("wake picker failed")
+            state = self._state(key)
+            state.last_active = time.time()
+            self.store.put(key, state)
+            await self._unpark(key)
 
     async def _wake_picker(self, key: Key) -> None:
         state = self._state(key)
@@ -280,7 +291,8 @@ class Bot:
                 InlineKeyboardButton("🆕 New one", callback_data="wake:new"),
             ]
         )
-        # Its cache has expired by now: the next message re-sends the whole context at full price.
+        # Its cache has expired, or the restarted process misses it: the next message re-sends
+        # the whole context at full price.
         rows.append([InlineKeyboardButton("🗜 Compact it and continue", callback_data="wake:compact")])
         idle = f" (last used {history.ago(state.last_active)})" if state.last_active else ""
         footer = (
@@ -292,6 +304,9 @@ class Bot:
 
     async def _wake(self, key: Key, choice: str) -> None:
         state = self._state(key)
+        if not state.parked:  # an old picker, already answered
+            await self._output(key).notice("Nothing is waiting for that picker any more.")
+            return
         if choice == "new":
             await self._new(key)
         elif choice == "compact":
@@ -305,14 +320,17 @@ class Bot:
         else:
             await self._resume(key, choice)
             if self._state(key).session_id != choice:  # it could not be resumed: ask again
-                if self.parked.get(key):
-                    await self._wake_picker(key)
+                if self._state(key).parked:
+                    await self._ask_wake(key)
                 return
         await self._unpark(key)
 
     async def _unpark(self, key: Key) -> None:
-        for text, ids in self.parked.pop(key, []):
-            await self._submit(key, text, ids)
+        state = self._state(key)
+        parked, state.parked = state.parked, []
+        self.store.put(key, state)
+        for item in parked:
+            await self._submit(key, item["text"], item["ids"])
 
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
@@ -358,6 +376,8 @@ class Bot:
                 n = len(state.pending)
                 await self._output(key).notice(f"↩️ Passing on {n} message{'s' * (n > 1)} sent before the restart")
                 self._session(key)
+            if state.parked and self._assigned(key):
+                await self._ask_wake(key)
 
     async def _cmd_help(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
@@ -413,6 +433,7 @@ class Bot:
             await sess.close()
         # A new directory means a new conversation; display preferences carry over.
         state = ConvState(cwd=str(path), mode=old.mode, model=old.model, tools=old.tools, title=old.title)
+        state.parked = old.parked  # the new conversation gets them
         self.store.put(key, state)
         msg = f"📁 Working in {self._rel(state.cwd)} (new conversation)"
         if any(s.state.cwd == state.cwd for k, s in self.sessions.items() if k != key):
@@ -420,6 +441,7 @@ class Bot:
         await self._output(key).notice(msg)
         for text, ids in self.held.pop(key, []):
             await self._submit(key, text, ids)
+        await self._unpark(key)
 
     async def _on_topic_created(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """A new topic named like a folder of the workdir works there; otherwise ask for one."""
@@ -457,7 +479,7 @@ class Bot:
         state = self._state(key)
         state.session_id = None
         state.cost_usd = 0.0
-        state.context_tokens = 0
+        state.context_tokens = state.after_compact = 0
         self.store.put(key, state)
         await self._output(key).notice(f"🆕 New conversation in {state.cwd}")
 
@@ -491,6 +513,8 @@ class Bot:
         out = self._output(key)
         state = self._state(key)
         if session_id == state.session_id:
+            state.last_active = time.time()  # so a parked message goes to it, not to a new picker
+            self.store.put(key, state)
             await out.notice("Already in that conversation.")
             return
         if any(s.state.session_id == session_id for k, s in self.sessions.items() if k != key):
@@ -505,7 +529,7 @@ class Bot:
             await sess.close()
         state.session_id = session_id
         state.cost_usd = await asyncio.to_thread(transcript_cost, session_id)
-        state.context_tokens = 0  # known from its first answer
+        state.context_tokens = state.after_compact = 0  # known from its first answer
         state.last_active = time.time()
         self.store.put(key, state)
         await self._output(key).notice(
