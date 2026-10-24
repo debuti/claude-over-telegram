@@ -26,6 +26,7 @@ class Config:
     docker_mounts: dict[str, list[str]]  # folder ("*": all) -> host paths it also sees, "path[:rw]"
     docker_path: str  # prepended to PATH in containers, e.g. for binaries in a mounted folder
     docker_limits: dict[str, tuple[str, str]]  # folder -> (cpus, memory)
+    compact_at: int  # context tokens that make a conversation compact before its next turn; 0: off
 
 
 def _limits(spec: str, cpus: str, memory: str) -> dict[str, tuple[str, str]]:
@@ -90,5 +91,6 @@ def load(workdir: Path) -> Config:
         docker_path=":".join(
             str(Path(p).expanduser()) for p in os.environ.get("DOCKER_PATH", "").replace(" ", "").split(":") if p
         ),
+        compact_at=int(os.environ.get("AUTO_COMPACT_TOKENS") or 200_000),
         docker_exclude=frozenset(x for x in os.environ.get("DOCKER_EXCLUDE", "").replace(" ", "").split(",") if x),
     )

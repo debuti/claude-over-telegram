@@ -100,6 +100,7 @@ All settings live in `.env` next to the code (see `.env.example`):
 | `TELEGRAM_TOKEN`   | (required) | Bot token from @BotFather                                       |
 | `ALLOWED_USER_IDS` | (empty)    | Comma-separated Telegram user ids allowed to use the bot        |
 | `PERMISSION_MODE`  | `auto`     | Initial permission mode: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
+| `AUTO_COMPACT_TOKENS` | `200000` | Context size that compacts a conversation before its next message; `0` turns it off |
 | `SANDBOX_DOCKER`   | `true`     | Run each conversation's Claude in its own container (see [Confinement](#confinement)) |
 | `DOCKER_CPUS`      | `2`        | CPUs each container may use                                     |
 | `DOCKER_MEMORY`    | `4g`       | Memory each container may use                                   |
@@ -232,8 +233,10 @@ confined to the topic's folder.
 
 Idle conversations stop their Claude process after 30 minutes. The next message
 after that doesn't just carry on: the bot holds it and asks whether to continue
-that conversation, switch to another one from the list or start a new one, since
-every message to a long conversation re-sends all of it. Conversations survive
+that conversation, compact it and continue, switch to another one from the list
+or start a new one, since every message to a long conversation re-sends all of
+it. A conversation whose context passes `AUTO_COMPACT_TOKENS` (200k) is compacted
+(`/compact`) before its next message. Conversations survive
 restarts (`state/sessions.json`).
 
 ### Past conversations

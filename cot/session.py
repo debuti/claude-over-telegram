@@ -89,6 +89,7 @@ class Session:
         cli_path: str | None,
         cli_env: dict[str, str],
         sandbox_bash: bool,
+        compact_at: int = 0,
     ):
         self.state = state
         self.out = out
@@ -97,6 +98,11 @@ class Session:
         self._default_mode = default_mode
         self._cli_path = cli_path
         self._cli_env = cli_env
+        self._compact_at = compact_at  # context size (tokens) that compacts before the next turn; 0: never
+        self.compact_next = False  # compact before the next turn whatever the size
+        self._compacting = False
+        self._after_compact = 0  # context right after the last compaction
+        self._measure_compacted = False  # the next answer tells how much compaction left
         # Items are {"text", "ids"}: ids of the Telegram messages, to acknowledge them.
         self._queue: asyncio.Queue[dict] = asyncio.Queue()
         self._gathered: list[dict] = []  # taken from the queue, waiting for the rest
@@ -158,6 +164,7 @@ class Session:
                 raise
             log.warning("resume of %s failed, starting a new session", self.state.session_id)
             self.state.session_id = None
+            self.state.context_tokens = 0
             self._on_state(self.state)
             client = ClaudeSDKClient(self._options())
             await client.connect()
@@ -285,6 +292,7 @@ class Session:
                     await self._disconnect()
                 if self._client is None:
                     await self._connect()
+                await self._maybe_compact()
                 await self._turn(items)
             except asyncio.CancelledError:
                 raise
@@ -298,6 +306,34 @@ class Session:
                 self._turn_done = None
                 self.busy = False
                 self._stopping = False
+
+    async def _maybe_compact(self) -> None:
+        """/compact before the turn when asked to, or when the context has grown past compact_at:
+        every call re-reads the whole context, so a long conversation costs more each message."""
+        size = self.state.context_tokens
+        # One that compaction can't bring down much shouldn't compact on every message.
+        floor = max(self._compact_at, 2 * self._after_compact)
+        if not self.compact_next and not (self._compact_at and size >= floor):
+            return
+        self.compact_next = False
+        await self.out.notice(f"🗜 Compacting the conversation ({size // 1000}k tokens of context) first…")
+        self._compacting = True
+        try:
+            await self._turn([{"text": "/compact", "ids": []}])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("compaction failed")
+            await self.out.notice(f"⚠️ Could not compact, going on without: {e}")
+            if not self._alive():
+                await self._disconnect()
+                await self._connect()
+        finally:
+            self._compacting = False
+            self._turn_done = None
+        self.state.context_tokens = 0
+        self._measure_compacted = True
+        self._on_state(self.state)
 
     async def _gather(self, first: dict) -> list[dict]:
         """The first message plus everything that follows it in quick succession."""
@@ -357,6 +393,11 @@ class Session:
     async def _handle(self, msg) -> None:
         if isinstance(msg, AssistantMessage):
             nested = msg.parent_tool_use_id is not None
+            if not nested and msg.usage:
+                u = msg.usage
+                self.state.context_tokens = sum(u.get(k) or 0 for k in TOKEN_KINDS[:3])
+                if self._measure_compacted:
+                    self._after_compact, self._measure_compacted = self.state.context_tokens, False
             if not nested and msg.model and not msg.model.startswith("<"):
                 self.model = msg.model
             for block in msg.content:
@@ -386,7 +427,7 @@ class Session:
                     "api_calls": msg.num_turns,
                     "seconds": round(msg.duration_ms / 1000),
                     "tokens": {k: u.get(k) for k in TOKEN_KINDS},
-                    "by": "user" if self._turn_done else "claude",
+                    "by": "compact" if self._compacting else "user" if self._turn_done else "claude",
                 }
                 asyncio.create_task(self.on_turn_end(entry))
             if self._stopping or (msg.terminal_reason or "").startswith("aborted"):

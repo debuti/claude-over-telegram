@@ -197,6 +197,7 @@ class Bot:
             out=out,
             on_state=lambda st: self.store.put(key, st),
             default_mode=self.cfg.permission_mode,
+            compact_at=self.cfg.compact_at,
             **self._runner(Path(state.cwd)),
         )
         sess.on_delivered = lambda ids: self._acknowledge(key, ids)
@@ -279,6 +280,8 @@ class Bot:
                 InlineKeyboardButton("🆕 New one", callback_data="wake:new"),
             ]
         )
+        # Its cache has expired by now: the next message re-sends the whole context at full price.
+        rows.append([InlineKeyboardButton("🗜 Compact it and continue", callback_data="wake:compact")])
         idle = f" (last used {history.ago(state.last_active)})" if state.last_active else ""
         footer = (
             f"💤 This conversation was asleep{idle}. Continue it, pick another one or start a new one: "
@@ -291,6 +294,10 @@ class Bot:
         state = self._state(key)
         if choice == "new":
             await self._new(key)
+        elif choice == "compact":
+            state.last_active = time.time()
+            self._session(key).compact_next = True
+            self.store.put(key, state)
         elif choice == state.session_id:
             state.last_active = time.time()
             self.store.put(key, state)
@@ -450,6 +457,7 @@ class Bot:
         state = self._state(key)
         state.session_id = None
         state.cost_usd = 0.0
+        state.context_tokens = 0
         self.store.put(key, state)
         await self._output(key).notice(f"🆕 New conversation in {state.cwd}")
 
@@ -497,6 +505,7 @@ class Bot:
             await sess.close()
         state.session_id = session_id
         state.cost_usd = await asyncio.to_thread(transcript_cost, session_id)
+        state.context_tokens = 0  # known from its first answer
         state.last_active = time.time()
         self.store.put(key, state)
         await self._output(key).notice(
