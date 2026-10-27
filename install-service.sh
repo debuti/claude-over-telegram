@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install the bot as a systemd user service: starts on boot, restarts on failure.
+# Install the bot as a systemd user service: starts on boot, restarts on failure, and
+# restarts every day at DAILY_RESTART (default 04:00; "off" for never).
 # Usage: ./install-service.sh [workdir]      (default: current directory)
 #        ./install-service.sh --print [workdir]   only show the unit file
 set -euo pipefail
@@ -11,6 +12,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="$(realpath "${1:-$PWD}")"
 NAME=claude-over-telegram
 UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$NAME.service"
+DAILY_RESTART="${DAILY_RESTART:-04:00}"
 
 [[ -d "$WORKDIR" ]] || { echo "not a directory: $WORKDIR" >&2; exit 1; }
 [[ -x "$REPO/.venv/bin/python" ]] || { echo "no .venv in $REPO; see the README" >&2; exit 1; }
@@ -52,9 +54,40 @@ fi
 
 mkdir -p "$(dirname "$UNIT")"
 printf '%s' "$content" > "$UNIT"
+
+# A daily restart, at night: a fresh process (and fresh Claude processes) every day.
+# Waiting messages survive it (state/sessions.json); a turn running at that time is cut.
+RESTART_UNIT="${UNIT%.service}-restart"
+if [[ "$DAILY_RESTART" != "off" ]]; then
+    printf '%s' "[Unit]
+Description=Restart Claude Code over Telegram
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --user restart $NAME.service
+" > "$RESTART_UNIT.service"
+    printf '%s' "[Unit]
+Description=Restart Claude Code over Telegram every day at $DAILY_RESTART
+
+[Timer]
+OnCalendar=*-*-* $DAILY_RESTART:00
+
+[Install]
+WantedBy=timers.target
+" > "$RESTART_UNIT.timer"
+fi
+
 systemctl --user daemon-reload
 systemctl --user enable --now "$NAME"
 echo "installed $UNIT and started it"
+if [[ "$DAILY_RESTART" != "off" ]]; then
+    systemctl --user enable --now "$NAME-restart.timer"
+    echo "it restarts every day at $DAILY_RESTART ($NAME-restart.timer)"
+elif [[ -f "$RESTART_UNIT.timer" ]]; then
+    systemctl --user disable --now "$NAME-restart.timer"
+    rm -f "$RESTART_UNIT.timer" "$RESTART_UNIT.service"
+    systemctl --user daemon-reload
+fi
 
 if [[ "$(loginctl show-user "$USER" -P Linger 2>/dev/null)" != "yes" ]]; then
     echo

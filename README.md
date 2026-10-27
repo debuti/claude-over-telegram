@@ -153,6 +153,12 @@ into the service, so Claude finds the same tools (node, git, …) as in your
 terminal. Use `./install-service.sh --print /path/to/workdir` to see the unit
 without installing anything. Stop `run.sh` first if it is running.
 
+It also installs `claude-over-telegram-restart.timer`, which restarts the bot every
+day at 4:00, so it picks up `git pull`s and starts fresh. Messages waiting for Claude
+survive the restart; a task Claude is working on at that time is cut short. Pick
+another time with `DAILY_RESTART=05:30 ./install-service.sh …`, or none with
+`DAILY_RESTART=off`.
+
 User services only run while you are logged in, unless lingering is on. To
 start the bot at boot without logging in, run once:
 
@@ -171,8 +177,8 @@ journalctl --user -u claude-over-telegram -f      # log
 To change the workdir, run `install-service.sh` again with the new path. To remove it:
 
 ```sh
-systemctl --user disable --now claude-over-telegram
-rm ~/.config/systemd/user/claude-over-telegram.service
+systemctl --user disable --now claude-over-telegram claude-over-telegram-restart.timer
+rm ~/.config/systemd/user/claude-over-telegram{.service,-restart.service,-restart.timer}
 systemctl --user daemon-reload
 ```
 
