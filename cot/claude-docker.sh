@@ -28,6 +28,17 @@ spec="$COT_IMAGE $PWD $(stat -c %Y "$COT_CLAUDE")"
 [[ -z "$home" ]] || spec+=" home:$home"
 [[ -z "$mounts" ]] || spec+=" mounts:$(printf %s "$mounts" | md5sum | cut -c1-8)"
 current="$(docker container inspect -f '{{.State.Running}} {{index .Config.Labels "cot.spec"}}' "$COT_NAME" 2>/dev/null || true)"
+# Starting anew removes the container with everything running in it (a detached build, a
+# dev server) and its /tmp. While anything but its keepers (see container.py) runs, keep
+# it as it is: the new settings apply once it is idle.
+busy() {
+    docker top "$COT_NAME" -eo pid,comm 2>/dev/null | tail -n +2 | awk '{print $2}' \
+        | grep -qvxE 'docker-init|sleep|claude'
+}
+if [[ "$current" == true* && "$current" != "true $spec" ]] && busy; then
+    echo "cot: $COT_NAME has older settings but something still runs in it; keeping it until idle" >&2
+    current="true $spec"
+fi
 if [[ "$current" != "true $spec" ]]; then
     docker rm -f "$COT_NAME" >/dev/null 2>&1 || true
     args=(run -d --init --name "$COT_NAME"
