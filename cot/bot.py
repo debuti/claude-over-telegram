@@ -57,6 +57,10 @@ COMMANDS = [
     ("server", "load of the machine the bot runs on"),
 ]
 
+# What the CLI keeps between its auto-compact window and the size it compacts at: room for
+# the summary (min(max output, 20k)) plus 13k; checked with get_context_usage on 0.2.168.
+COMPACT_BUFFER = 33_000
+
 MODELS = {
     "claude-fable-5-1": "Fable 5.1",
     "claude-opus-5-5": "Opus 5.5",
@@ -183,12 +187,21 @@ class Bot:
                 env["COT_MOUNTS"] = "\n".join(mounts)
             if self.cfg.docker_path:
                 env["COT_PATH"] = self.cfg.docker_path
-            return {"cli_path": self.cli_path, "cli_env": {**env, **self._ttl_env()}, "sandbox_bash": False}
-        return {"cli_path": self.cfg.cli_path, "cli_env": self._ttl_env(), "sandbox_bash": self.cfg.sandbox_bash}
+            return {"cli_path": self.cli_path, "cli_env": {**env, **self._cli_settings()}, "sandbox_bash": False}
+        return {"cli_path": self.cfg.cli_path, "cli_env": self._cli_settings(), "sandbox_bash": self.cfg.sandbox_bash}
 
-    def _ttl_env(self) -> dict[str, str]:
-        """An explicit CACHE_TTL goes to the CLI too, so the bot's estimates match its cache."""
-        return {"CLAUDE_CODE_PROMPT_CACHE_TTL": self.cfg.cache_ttl} if self.cfg.cache_ttl != "auto" else {}
+    def _cli_settings(self) -> dict[str, str]:
+        """Settings the bot shares with the CLI, so both act on the same numbers."""
+        env = {}
+        # An explicit CACHE_TTL goes to the CLI too, so the bot's estimates match its cache.
+        if self.cfg.cache_ttl != "auto":
+            env["CLAUDE_CODE_PROMPT_CACHE_TTL"] = self.cfg.cache_ttl
+        # Claude compacts by itself only near the model's window (967k of Opus's 1M), so a long
+        # turn re-reads an ever larger context on each of its hundreds of calls. The CLI fires at
+        # its window minus a buffer: give it the window whose threshold is AUTO_COMPACT_TOKENS.
+        if self.cfg.compact_at:
+            env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(self.cfg.compact_at + COMPACT_BUFFER)
+        return env
 
     def _session(self, key: Key) -> Session:
         sess = self.sessions.get(key)

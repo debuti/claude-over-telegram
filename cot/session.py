@@ -21,6 +21,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
+    SystemMessage,
     TaskNotificationMessage,
     TaskStartedMessage,
     TaskUpdatedMessage,
@@ -451,6 +452,7 @@ class Session:
             "context_before": context,
             "just_compacted": self._measure_compacted,  # a new summary: written, not read
             "first_call": None,
+            "compactions": [],  # context sizes Claude compacted from by itself during the turn
             "estimated": round(costguard.estimate(context, cold, self._ttl).equivalent) if context else None,
         }
         self._fresh = False
@@ -516,6 +518,17 @@ class Session:
             return False
         return True
 
+    async def _compacted(self, data: dict) -> None:
+        """Claude compacted on its own (CLAUDE_CODE_AUTO_COMPACT_WINDOW), maybe in the middle of a turn."""
+        meta = data.get("compact_metadata") or data.get("compactMetadata") or {}
+        if self._compacting or meta.get("trigger") == "manual":  # our own /compact reports itself
+            return
+        size = meta.get("pre_tokens") or meta.get("preTokens") or self.state.context_tokens
+        if self._probe is not None:
+            self._probe["compactions"].append(size)
+        self._measure_compacted = True  # the next answer tells how much it left
+        await self.out.notice(f"🗜 Claude compacted the conversation ({size // 1000}k tokens of context) to go on")
+
     async def _handle(self, msg) -> None:
         if isinstance(msg, AssistantMessage):
             nested = msg.parent_tool_use_id is not None
@@ -539,6 +552,8 @@ class Session:
                     await self.out.text(block.text)
                 elif isinstance(block, ToolUseBlock):
                     await self.out.tool_use(block.name, block.input, nested)
+        elif isinstance(msg, SystemMessage) and msg.subtype == "compact_boundary":
+            await self._compacted(msg.data)
         elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
             for block in msg.content:
                 if isinstance(block, ToolResultBlock) and not self._stopping:

@@ -102,7 +102,7 @@ All settings live in `.env` next to the code (see `.env.example`):
 | `TELEGRAM_TOKEN`   | (required) | Bot token from @BotFather                                       |
 | `ALLOWED_USER_IDS` | (empty)    | Comma-separated Telegram user ids allowed to use the bot        |
 | `PERMISSION_MODE`  | `auto`     | Initial permission mode: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
-| `AUTO_COMPACT_TOKENS` | `200000` | Context size that compacts a conversation before its next message; `0` turns it off |
+| `AUTO_COMPACT_TOKENS` | `150000` | Context size that compacts a conversation, also in the middle of a task (passed to Claude as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`); `0` turns it off |
 | `CACHE_TTL`        | `auto`     | Prompt cache lifetime: `auto` (1 hour on a subscription, 5 minutes with an API key), `5m` or `1h` (passed to Claude too) |
 | `SANDBOX_DOCKER`   | `true`     | Run each conversation's Claude in its own container (see [Confinement](#confinement)) |
 | `DOCKER_CPUS`      | `2`        | CPUs each container may use                                     |
@@ -241,9 +241,11 @@ whose cache lasts 5), or once the background commands Claude is waiting for end
 after that doesn't just carry on: the bot holds it and asks whether to continue
 that conversation, compact it and continue, switch to another one from the list
 or start a new one, since every message to a long conversation re-sends all of
-it. A conversation whose context passes `AUTO_COMPACT_TOKENS` (200k) is compacted
+it. A conversation whose context passes `AUTO_COMPACT_TOKENS` (150k) is compacted
 (`/compact`) before its next message, or before its process stops, while the cache
-still holds it. Conversations survive
+still holds it. Claude itself compacts at that size too, also in the middle of a long
+task: otherwise it would wait until 967k (Opus has a 1M-token window), and each of a
+long task's hundreds of calls re-reads the whole context. Conversations survive
 restarts (`state/sessions.json`).
 
 ### Past conversations

@@ -151,3 +151,17 @@ def test_transcript_context(tmp_path, monkeypatch):
     context, mtime = session_mod.transcript_context("abc")
     assert context == 6 and mtime > 0
     assert session_mod.transcript_context("missing") == (0, 0.0)
+
+
+async def test_claude_compacting_mid_turn_is_logged():
+    from claude_agent_sdk import SystemMessage
+
+    sess = make()
+    boundary = SystemMessage("compact_boundary", {"compact_metadata": {"trigger": "auto", "pre_tokens": 151_000}})
+    FakeClient.scripts = [[answer(read=150_000), boundary, answer(read=0, write=20_000), result()]]
+    await sess.send("long task")
+    await until(lambda: sess.entries)
+    assert sess.entries[0]["compactions"] == [151_000]
+    assert sess.state.after_compact == 20_005
+    assert sess.out.notices == ["🗜 Claude compacted the conversation (151k tokens of context) to go on"]
+    await sess.close()

@@ -26,7 +26,7 @@ class Config:
     docker_mounts: dict[str, list[str]]  # folder ("*": all) -> host paths it also sees, "path[:rw]"
     docker_path: str  # prepended to PATH in containers, e.g. for binaries in a mounted folder
     docker_limits: dict[str, tuple[str, str]]  # folder -> (cpus, memory)
-    compact_at: int  # context tokens that make a conversation compact before its next turn; 0: off
+    compact_at: int  # context tokens at which a conversation compacts, also mid-turn; 0: off
     cache_ttl: str  # auto | 5m | 1h: the prompt cache's lifetime (see costguard.cache_ttl)
     api_key: bool  # ANTHROPIC_API_KEY set: billed per use, 5-minute cache by default
     debug_ttl: int  # COT_DEBUG_TTL_SECONDS: the TTL the bot assumes, for testing; 0: off
@@ -98,7 +98,7 @@ def load(workdir: Path) -> Config:
         docker_path=":".join(
             str(Path(p).expanduser()) for p in os.environ.get("DOCKER_PATH", "").replace(" ", "").split(":") if p
         ),
-        compact_at=int(os.environ.get("AUTO_COMPACT_TOKENS") or 200_000),
+        compact_at=int(os.environ.get("AUTO_COMPACT_TOKENS") or 150_000),
         cache_ttl=cache_ttl,
         api_key=bool(os.environ.get("ANTHROPIC_API_KEY")),
         debug_ttl=int(os.environ.get("COT_DEBUG_TTL_SECONDS") or 0),
