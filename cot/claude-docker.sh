@@ -17,9 +17,15 @@ swap="${COT_MEMORY_SWAP:--1}"
 # unless :rw.
 mounts="${COT_MOUNTS:-}"
 
-# Same image, folder, claude binary and extra mounts as the running container, or start
+# The folder's own home on the host (a bot from before 2.14 passes none: the image's).
+# What Claude installs or sets up there (npm -g, pip --user, caches, tool logins)
+# outlives the container.
+home="${COT_HOME:-}"
+
+# Same image, folder, home, claude binary and extra mounts as the running container, or start
 # anew. Limits don't count: docker update changes them in place, without stopping anything.
 spec="$COT_IMAGE $PWD $(stat -c %Y "$COT_CLAUDE")"
+[[ -z "$home" ]] || spec+=" home:$home"
 [[ -z "$mounts" ]] || spec+=" mounts:$(printf %s "$mounts" | md5sum | cut -c1-8)"
 current="$(docker container inspect -f '{{.State.Running}} {{index .Config.Labels "cot.spec"}}' "$COT_NAME" 2>/dev/null || true)"
 if [[ "$current" != "true $spec" ]]; then
@@ -34,17 +40,31 @@ if [[ "$current" != "true $spec" ]]; then
         -v "$PWD:$PWD"
         -v "$COT_CLAUDE:/usr/local/bin/claude:ro"
         -v "$(dirname "$0")/nice-shell.sh:/usr/local/bin/cot-shell:ro")
+    if [[ -n "$home" ]]; then
+        mkdir -p "$home"
+        args+=(-v "$home:$HOME")
+    fi
+    # A path mounted inside the home needs its mount point there first, made by us:
+    # docker would make it as root, and the agent couldn't write next to it.
+    bind() {  # bind PATH MODE
+        if [[ -n "$home" && "$1" == "$HOME"/* ]]; then
+            local point="$home/${1#"$HOME"/}"
+            if [[ -d "$1" ]]; then mkdir -p "$point"
+            else mkdir -p "$(dirname "$point")"; [[ -e "$point" ]] || touch "$point"; fi
+        fi
+        args+=(-v "$1:$1:$2")
+    }
     mkdir -p "$HOME/.claude"
-    args+=(-v "$HOME/.claude:$HOME/.claude")
-    [[ -f "$HOME/.claude.json" ]] && args+=(-v "$HOME/.claude.json:$HOME/.claude.json")
+    bind "$HOME/.claude" rw
+    [[ -f "$HOME/.claude.json" ]] && bind "$HOME/.claude.json" rw
     for p in .gitconfig .ssh .config/gh; do
-        [[ -e "$HOME/$p" ]] && args+=(-v "$HOME/$p:$HOME/$p:ro")
+        [[ -e "$HOME/$p" ]] && bind "$HOME/$p" ro
     done
     # Docker mounts parents first, so the conversation's folder stays writable inside one.
     while IFS= read -r m; do
         mode=ro
         [[ "$m" == *:rw ]] && { m="${m%:rw}"; mode=rw; }
-        [[ -n "$m" && -e "$m" ]] && args+=(-v "$m:$m:$mode")
+        [[ -n "$m" && -e "$m" ]] && bind "$m" "$mode"
     done <<< "$mounts"
     docker "${args[@]}" "$COT_IMAGE" sleep infinity >/dev/null
 else
@@ -59,8 +79,12 @@ docker exec "$COT_NAME" sh -c 'pkill -x claude || exit 0
 
 # Only what Claude needs from the bot's environment: never the Telegram token.
 exec_args=(exec -i -w "$PWD")
-# Binaries from mounted folders first (the image's own PATH after them).
-[[ -z "${COT_PATH:-}" ]] || exec_args+=(-e "PATH=$COT_PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+# Binaries from mounted folders first, then those installed in the home (npm -g goes
+# there too), then the image's own.
+path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+[[ -z "$home" ]] || { path="$HOME/.local/bin:$path"; exec_args+=(-e "NPM_CONFIG_PREFIX=$HOME/.local"); }
+[[ -z "${COT_PATH:-}" ]] || path="$COT_PATH:$path"
+[[ "$path" == /usr/local/sbin:* ]] || exec_args+=(-e "PATH=$path")
 # Commands below Claude in priority (containers from before 2.7 lack the script).
 docker exec "$COT_NAME" test -x /usr/local/bin/cot-shell \
     && exec_args+=(-e CLAUDE_CODE_SHELL_PREFIX=/usr/local/bin/cot-shell)

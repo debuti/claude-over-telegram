@@ -177,6 +177,7 @@ class Bot:
         if self.cfg.docker and cwd.name not in self.cfg.docker_exclude:
             cpus, memory = self.cfg.docker_limits.get(cwd.name, (self.cfg.docker_cpus, self.cfg.docker_memory))
             env = {**self.cli_env, **container.limits(cpus, memory)}
+            env["COT_HOME"] = str(self.cfg.state_dir / "homes" / cwd.name)
             mounts = self.cfg.docker_mounts.get("*", []) + self.cfg.docker_mounts.get(cwd.name, [])
             if mounts:
                 env["COT_MOUNTS"] = "\n".join(mounts)

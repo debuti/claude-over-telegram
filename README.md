@@ -266,7 +266,15 @@ container sees only:
 - `~/.claude` and `~/.claude.json`, for the login and for `/resume`;
 - `~/.gitconfig`, `~/.ssh` and `~/.config/gh`, read-only, so it can push. This
   is a hole in the isolation: whatever your SSH key and `gh` can reach, Claude
-  can too.
+  can too;
+- a home of its own, `state/homes/<folder>` on the host, shared by the folder's
+  conversations. What Claude installs there (`npm i -g`, `~/.local/bin`, which
+  is on its PATH), tool settings and caches outlive the container. System
+  packages (`apt`) don't: it isn't root; those go in the Dockerfile;
+- the paths in `DOCKER_MOUNTS`, at the same path. Credentials you want every
+  conversation to use go there, once, from your own home: they show up inside
+  each folder's home (e.g. `*=~/.config/.wrangler:rw` to deploy to Cloudflare;
+  `:rw` because wrangler refreshes its token). Same hole as above.
 
 A conversation's container outlives its Claude: when Claude stops (after 30
 minutes without messages, or when the bot restarts) whatever it started
