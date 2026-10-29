@@ -51,6 +51,26 @@ APPEND_PROMPT = (
     "run_in_background and `while kill -0 PID 2>/dev/null; do sleep 15; done; tail -n 50 job.log`, "
     "and end your turn meanwhile; for one that runs for hours, tell the user how to ask you later."
 )
+# Every API call re-reads the start of the context, so leave out what can't be used from Telegram:
+# the account's claude.ai connectors and the skills for a desktop, browser or terminal UI.
+CLI_SETTINGS = {
+    "disableClaudeAiConnectors": True,
+    "skillOverrides": {
+        name: "off"
+        for name in (
+            "artifact-emulator",
+            "built-in-browser",
+            "chrome-browser",
+            "computer-use",
+            "docs",
+            "google-workspace",
+            "import-memory",
+            "morning",
+            "keybindings-help",
+            "plugin-authoring",
+        )
+    },
+}
 # Background tasks (a command run with run_in_background) keep the process up until they end,
 # this long at most: the process is what tells Claude they ended.
 TASK_WAIT = 6 * 60 * 60
@@ -190,6 +210,7 @@ class Session:
             mcp_servers={tg_tools.SERVER: tg_tools.make_server(self.out, Path(self.state.cwd))},
             allowed_tools=[tg_tools.SEND_FILE],
             system_prompt={"type": "preset", "preset": "claude_code", "append": APPEND_PROMPT},
+            settings=json.dumps(CLI_SETTINGS),
             cli_path=self._cli_path,
             env={**self._cli_env, "COT_NAME": self._container_name()},
             can_use_tool=permissions.make_can_use_tool(self.out, Path(self.state.cwd), self._set_waiting),
