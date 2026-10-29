@@ -104,7 +104,7 @@ All settings live in `.env` next to the code (see `.env.example`):
 | `PERMISSION_MODE`  | `auto`     | Initial permission mode: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
 | `AUTO_COMPACT_TOKENS` | `150000` | Context size that compacts a conversation, also in the middle of a task (passed to Claude as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`); `0` turns it off |
 | `CACHE_TTL`        | `auto`     | Prompt cache lifetime: `auto` (1 hour on a subscription, 5 minutes with an API key), `5m` or `1h` (passed to Claude too) |
-| `CACHE_ALARMS`     | `30,15,10,5,2,1` | Minutes before a conversation's prompt cache expires at which the bot warns in it (with what the next message will cost once it's gone); `off` turns them off. Each alarm replaces the one before, and the last goes once the conversation is used again |
+| `CACHE_ALARMS`     | `30,15,10,5,2,1` | Minutes before a conversation's prompt cache expires at which the bot warns in it (with what the next message will cost once it's gone); `off` turns them off. Each alarm replaces the one before, and the last goes once the conversation is used again. When the cache does expire, a silent message says so, with the plan usage |
 | `SANDBOX_DOCKER`   | `true`     | Run each conversation's Claude in its own container (see [Confinement](#confinement)) |
 | `DOCKER_CPUS`      | `2`        | CPUs each container may use                                     |
 | `DOCKER_MEMORY`    | `4g`       | Memory each container may use                                   |

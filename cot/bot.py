@@ -488,6 +488,9 @@ class Bot:
         if not state.session_id or not state.last_api_at or (sess and sess.pending) or not self._assigned(key):
             return
         left = costguard.cache_left(time.time(), state.last_api_at, self.ttl)
+        if left <= 0 and alarm and alarm["step"]:
+            await self._cache_expired(key, state)
+            return
         step = costguard.alarm_step(left, self.ttl, self.cfg.cache_alarms, alarm and alarm["step"])
         if step is None:
             return
@@ -501,6 +504,26 @@ class Bot:
         )
         msg_id = await self._output(key).send_html(text)
         self.alarms[key] = {"at": state.last_api_at, "step": step, "msg_id": msg_id}
+
+    async def _cache_expired(self, key: Key, state: ConvState) -> None:
+        """The cache the alarms counted down is gone: say so, with the plan usage (free to fetch)."""
+        await self._delete_alarm(key)
+        self.alarms[key] = {"at": state.last_api_at, "step": 0, "msg_id": None}
+        sess = self.sessions.get(key)
+        asleep = "" if sess and sess.connected else ", Claude is asleep"
+        text = f"🧊 Cache expired{asleep}. The next message re-sends {costguard.kilo(state.context_tokens)} tokens."
+        if not self.cfg.api_key:
+            text += "\n\n" + await self._usage_text()
+        await self._output(key).send_html(esc(text), silent=True)
+
+    async def _usage_text(self) -> str:
+        try:
+            return usage.render(await usage.fetch(self.cfg.cli_path or container.bundled_cli()))
+        except usage.Unavailable as e:
+            return f"⚠️ Usage not available: {e}"
+        except Exception as e:
+            log.exception("usage failed")
+            return f"⚠️ Could not fetch usage: {e}"
 
     async def _delete_alarm(self, key: Key) -> None:
         """Take down the conversation's last cache alarm: only the latest one says how things stand."""
@@ -814,15 +837,7 @@ class Bot:
         )
 
     async def _cmd_usage(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        out = self._output(self._key(update))
-        try:
-            text = usage.render(await usage.fetch(self.cfg.cli_path or container.bundled_cli()))
-        except usage.Unavailable as e:
-            text = f"⚠️ Usage not available: {e}"
-        except Exception as e:
-            log.exception("usage failed")
-            text = f"⚠️ Could not fetch usage: {e}"
-        await out.notice(text)
+        await self._output(self._key(update)).notice(await self._usage_text())
 
     async def _cmd_server(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
