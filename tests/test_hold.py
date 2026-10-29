@@ -130,3 +130,15 @@ async def test_stop_drops_held(bot, monkeypatch):
 def test_callback_data_fits(bot):
     assert len(f"guard:{'a' * 6}:r:{'x' * 36}".encode()) <= 64
     assert bot_mod.secrets.token_hex(3).__len__() == 6
+
+
+@pytest.mark.parametrize(
+    "idle, connected, held",
+    [(56 * 60, False, False), (59 * 60, False, True), (2 * 3600, True, False), (10 * 60, False, False)],
+)
+def test_holds_only_once_the_cache_is_cold(tmp_path, idle, connected, held):
+    b = object.__new__(Bot)
+    b.ttl = 3600
+    state = ConvState(cwd=str(tmp_path), session_id="s1", last_api_at=bot_mod.time.time() - idle)
+    b.sessions = {KEY: SimpleNamespace(state=state, connected=connected, pending=False)}
+    assert b._should_hold(KEY) is held

@@ -22,7 +22,7 @@ from . import __version__, container, costguard, history, permissions, server, u
 from .config import Config
 from .output import TelegramOutput
 from .render import esc
-from .session import Session, idle_disconnect, transcript_context, transcript_cost
+from .session import Session, transcript_context, transcript_cost
 from .store import ConvState, Key, Store
 
 log = logging.getLogger(__name__)
@@ -291,12 +291,16 @@ class Bot:
         self._ensure_typing(key, sess)
 
     def _should_hold(self, key: Key) -> bool:
-        """A conversation whose Claude stopped for lack of use: where its next message goes is asked."""
+        """A conversation asleep with its cache gone: where its next message goes is asked.
+
+        Asleep with the cache still warm (Claude sleeps a few minutes early, to compact first),
+        going on with it is the cheap choice, so the message goes straight there.
+        """
         state = self._state(key)
         sess = self.sessions.get(key)
         if not state.session_id or (sess and (sess.connected or sess.pending)):
             return False
-        return time.time() - state.last_active >= idle_disconnect()
+        return costguard.is_cold(time.time(), state.last_api_at or state.last_active, self.ttl)
 
     async def _ask_hold(self, key: Key) -> None:
         """The warning for held messages; without it nothing would deliver them, so they go on."""
