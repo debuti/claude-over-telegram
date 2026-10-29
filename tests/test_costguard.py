@@ -87,3 +87,32 @@ def test_calibration_takes_the_median_of_the_newest(tmp_path):
     cal = Calibration.from_log(write_log(tmp_path, entries))
     assert cal.samples == costguard.CALIBRATION_ENTRIES
     assert cal.percent_per_token == pytest.approx(1 / 100_000)
+
+
+STEPS = (30, 15, 10, 5, 2, 1)
+
+
+@pytest.mark.parametrize(
+    "left, last, step",
+    [
+        (3000, None, None),  # 50 min left: nothing yet
+        (1800, None, 30),
+        (1500, 30, None),  # 30 already rang
+        (899, 30, 15),
+        (700, None, 15),  # the bot was down at 30: only the closest rings
+        (59, 2, 1),
+        (30, 1, None),
+        (0, None, None),  # expired
+    ],
+)
+def test_alarm_step(left, last, step):
+    assert costguard.alarm_step(left, 3600, STEPS, last) == step
+
+
+def test_alarm_step_skips_steps_as_long_as_the_cache():
+    assert costguard.alarm_step(240, 300, STEPS, None) is None  # 5 min with a 5-minute cache
+    assert costguard.alarm_step(120, 300, STEPS, None) == 2
+
+
+def test_cache_left():
+    assert costguard.cache_left(1000 + 600, 1000, 3600) == 3600 - 60 - 600

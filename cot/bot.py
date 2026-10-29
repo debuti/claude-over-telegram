@@ -81,6 +81,9 @@ class Bot:
         # Messages sent to a topic before it has a folder; delivered once one is picked.
         self.no_folder: dict[Key, list[tuple[str, list[int]]]] = {}
         self.ttl = costguard.cache_ttl(cfg)
+        # The cache alarm last sent per conversation: {"at": last_api_at it counts from, "step", "msg_id"}.
+        self.alarms: dict[Key, dict] = {}
+        self._alarm_task: asyncio.Task | None = None
         self.usage_log = usagelog.UsageLog(cfg.state_dir / "usage.jsonl", cfg.cli_path or container.bundled_cli())
         self.app = (
             Application.builder()
@@ -462,6 +465,52 @@ class Bot:
                 await self._backfill(key, state)
             if state.held and self._assigned(key):
                 await self._ask_hold(key)
+        if self.cfg.cache_alarms:
+            self._alarm_task = asyncio.create_task(self._alarm_loop())
+
+    async def _alarm_loop(self) -> None:
+        while True:
+            await asyncio.sleep(15)
+            for key, state in self.store.items():
+                try:
+                    await self._check_alarm(key, state)
+                except Exception:
+                    log.exception("cache alarm failed")
+
+    async def _check_alarm(self, key: Key, state: ConvState) -> None:
+        """Warn as the conversation's prompt cache nears its end (CACHE_ALARMS minutes before)."""
+        sess = self.sessions.get(key)
+        state = sess.state if sess else state
+        alarm = self.alarms.get(key)
+        if alarm and alarm["at"] != state.last_api_at:  # used again (or reset): the cache is fresh
+            await self._delete_alarm(key)
+            alarm = None
+        if not state.session_id or not state.last_api_at or (sess and sess.pending) or not self._assigned(key):
+            return
+        left = costguard.cache_left(time.time(), state.last_api_at, self.ttl)
+        step = costguard.alarm_step(left, self.ttl, self.cfg.cache_alarms, alarm and alarm["step"])
+        if step is None:
+            return
+        await self._delete_alarm(key)
+        calibration = await asyncio.to_thread(costguard.Calibration.from_log, self.cfg.state_dir / "usage.jsonl")
+        est = costguard.estimate(state.context_tokens, True, self.ttl, calibration)
+        mins = max(round(left / 60), 1)
+        text = (
+            f"⏳ <b>{mins} min</b> of cache left. After that the next message re-sends "
+            f"{esc(costguard.format_estimate(est))}"
+        )
+        msg_id = await self._output(key).send_html(text)
+        self.alarms[key] = {"at": state.last_api_at, "step": step, "msg_id": msg_id}
+
+    async def _delete_alarm(self, key: Key) -> None:
+        """Take down the conversation's last cache alarm: only the latest one says how things stand."""
+        alarm = self.alarms.pop(key, None)
+        if not alarm or not alarm["msg_id"]:
+            return
+        try:
+            await self.app.bot.delete_message(key[0], alarm["msg_id"])
+        except TelegramError as e:
+            log.debug("could not delete the cache alarm: %s", e)
 
     async def _backfill(self, key: Key, state: ConvState) -> None:
         """Context size and last call time from the transcript, for state that lacks them."""
@@ -836,5 +885,7 @@ class Bot:
         log.warning("ignored update from user id=%s username=%s", user and user.id, user and user.username)
 
     async def _shutdown(self, app: Application) -> None:
+        if self._alarm_task:
+            self._alarm_task.cancel()
         for sess in self.sessions.values():
             await sess.close()

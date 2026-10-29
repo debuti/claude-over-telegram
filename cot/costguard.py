@@ -52,6 +52,27 @@ def is_cold(now: float, last_api_at: float, ttl: int, margin: int = 60) -> bool:
     return now - last_api_at >= ttl - margin
 
 
+def cache_left(now: float, last_api_at: float, ttl: int, margin: int = 60) -> float:
+    """Seconds until is_cold turns true."""
+    return last_api_at + ttl - margin - now
+
+
+def alarm_step(left: float, ttl: int, steps: tuple[int, ...], last: int | None) -> int | None:
+    """The cache alarm (minutes left) due now, or None.
+
+    Only the closest of the steps already reached rings, so an alarm missed while the bot was
+    down doesn't bring the earlier ones with it; last is the one that rang for this cache. Steps
+    as long as the cache itself would ring right after every answer, so they are left out.
+    """
+    if left <= 0:
+        return None
+    reached = [s for s in steps if left <= s * 60 < ttl]
+    if not reached:
+        return None
+    step = min(reached)
+    return step if last is None or step < last else None
+
+
 def weighted(tokens: dict, ttl: int = 3600) -> float:
     """Equivalent tokens of a turn's usage ({input_tokens, cache_creation_input_tokens, …})."""
     t = {k: tokens.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens",

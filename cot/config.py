@@ -29,6 +29,7 @@ class Config:
     compact_at: int  # context tokens at which a conversation compacts, also mid-turn; 0: off
     cache_ttl: str  # auto | 5m | 1h: the prompt cache's lifetime (see costguard.cache_ttl)
     api_key: bool  # ANTHROPIC_API_KEY set: billed per use, 5-minute cache by default
+    cache_alarms: tuple[int, ...]  # minutes before the cache expires at which to warn; (): off
     debug_ttl: int  # COT_DEBUG_TTL_SECONDS: the TTL the bot assumes, for testing; 0: off
 
 
@@ -53,6 +54,16 @@ def _mounts(spec: str) -> dict[str, list[str]]:
             path, rw = (p[:-3], ":rw") if p.endswith(":rw") else (p.removesuffix(":ro"), "")
             mounts.setdefault(folder, []).append(str(Path(path).expanduser()) + rw)
     return mounts
+
+
+def _minutes(spec: str) -> tuple[int, ...]:
+    """"30,15,…" into (30, 15, …); empty or "off": ()."""
+    if spec.strip().lower() in ("", "off", "0"):
+        return ()
+    try:
+        return tuple(sorted({int(x) for x in spec.replace(" ", "").split(",") if x}, reverse=True))
+    except ValueError:
+        raise SystemExit(f"CACHE_ALARMS must be minutes separated by commas, not {spec}") from None
 
 
 def load(workdir: Path) -> Config:
@@ -101,6 +112,7 @@ def load(workdir: Path) -> Config:
         compact_at=int(os.environ.get("AUTO_COMPACT_TOKENS") or 150_000),
         cache_ttl=cache_ttl,
         api_key=bool(os.environ.get("ANTHROPIC_API_KEY")),
+        cache_alarms=_minutes(os.environ.get("CACHE_ALARMS", "30,15,10,5,2,1")),
         debug_ttl=int(os.environ.get("COT_DEBUG_TTL_SECONDS") or 0),
         docker_exclude=frozenset(x for x in os.environ.get("DOCKER_EXCLUDE", "").replace(" ", "").split(",") if x),
     )
