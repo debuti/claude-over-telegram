@@ -78,6 +78,12 @@ TASK_WAIT = 6 * 60 * 60
 # so they reach Claude as a single turn. Messages queued during a turn merge too.
 GATHER_SECONDS = 3.0
 
+# What a keep-alive turn sends: as short an answer as possible, and nothing done.
+KEEPALIVE_PROMPT = (
+    "[Automatic keep-alive from the Telegram bot, to keep the prompt cache warm. The user is "
+    "away. Do nothing and reply with just: ok]"
+)
+
 OnState = Callable[[ConvState], None]
 
 
@@ -169,6 +175,7 @@ class Session:
         self._compact_at = compact_at  # context size (tokens) that compacts before the next turn; 0: never
         self.compact_next = False  # compact before the next turn whatever the size
         self._compacting = False
+        self._keepalive = False  # the running turn only keeps the cache warm: nothing to show
         self._measure_compacted = False  # the next answer tells how much compaction left
         # Items are {"text", "ids"}: ids of the Telegram messages, to acknowledge them.
         self._queue: asyncio.Queue[dict] = asyncio.Queue()
@@ -259,6 +266,14 @@ class Session:
         self.state.pending.append(item)
         self._on_state(self.state)
         await self._queue.put(item)
+
+    async def keepalive(self) -> None:
+        """Refresh the prompt cache with a tiny turn whose answer nobody sees.
+
+        Not kept in state.pending: one lost in a restart has nothing to pass on.
+        """
+        if not self.pending:
+            await self._queue.put({"text": KEEPALIVE_PROMPT, "ids": [], "keepalive": True})
 
     @property
     def pending(self) -> bool:
@@ -403,6 +418,7 @@ class Session:
                 self._turn_done = None
                 self.busy = False
                 self._stopping = False
+                self._keepalive = False
 
     def _needs_compact(self) -> bool:
         """Asked to, or the context has grown past compact_at: every call re-reads the whole
@@ -451,8 +467,13 @@ class Session:
 
     async def _turn(self, items: list[dict]) -> None:
         assert self._client
+        # A message that came with a keep-alive refreshes the cache by itself.
+        real = [item for item in items if not item.get("keepalive")]
+        self._keepalive = not real
+        items = real or items[:1]
         self._turn_done = asyncio.get_running_loop().create_future()
-        self.state.last_active = time.time()
+        if not self._keepalive:  # keep-alives don't count as use: they stop some hours after it
+            self.state.last_active = time.time()
         self._begin_turn()
         await self._client.query("\n\n".join(item["text"] for item in items))
         # Claude has them: no longer pending, and the user sees they arrived.
@@ -504,7 +525,8 @@ class Session:
         try:
             async for msg in client.receive_messages():
                 self._last_activity = time.monotonic()
-                self.state.last_active = time.time()  # saved with the turn's result
+                if not self._keepalive:
+                    self.state.last_active = time.time()  # saved with the turn's result
                 if self._track_task(msg):  # bookkeeping, not a turn
                     continue
                 if not self.busy:  # a turn Claude started on its own
@@ -569,6 +591,8 @@ class Session:
             if not nested and msg.model and not msg.model.startswith("<"):
                 self.model = msg.model
             for block in msg.content:
+                if self._keepalive:
+                    continue
                 if isinstance(block, TextBlock) and block.text.strip() and not nested:
                     await self.out.text(block.text)
                 elif isinstance(block, ToolUseBlock):
@@ -577,7 +601,7 @@ class Session:
             await self._compacted(msg.data)
         elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
             for block in msg.content:
-                if isinstance(block, ToolResultBlock) and not self._stopping:
+                if isinstance(block, ToolResultBlock) and not self._stopping and not self._keepalive:
                     await self.out.tool_result(block.content, bool(block.is_error))
         elif isinstance(msg, ResultMessage):
             if msg.session_id and msg.session_id != self.state.session_id:
@@ -597,7 +621,8 @@ class Session:
                     "turns": msg.num_turns,
                     "seconds": round(msg.duration_ms / 1000),
                     "tokens": {k: u.get(k) for k in TOKEN_KINDS},
-                    "by": "compact" if self._compacting else "user" if self._turn_done else "claude",
+                    "by": "compact" if self._compacting else "keepalive" if self._keepalive
+                    else "user" if self._turn_done else "claude",
                     "context_tokens": self.state.context_tokens,
                     **self._probe_result(),
                 }

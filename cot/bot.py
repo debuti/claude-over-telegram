@@ -538,7 +538,7 @@ class Bot:
                 await self._backfill(key, state)
             if state.held and self._assigned(key):
                 await self._ask_hold(key)
-        if self.cfg.cache_alarms:
+        if self.cfg.cache_alarms or self.cfg.keepalive > self.ttl:
             self._alarm_task = asyncio.create_task(self._alarm_loop())
 
     async def _alarm_loop(self) -> None:
@@ -548,10 +548,11 @@ class Bot:
                 try:
                     await self._check_alarm(key, state)
                 except Exception:
-                    log.exception("cache alarm failed")
+                    log.exception("cache alarm or keep-alive failed")
 
     async def _check_alarm(self, key: Key, state: ConvState) -> None:
-        """Warn as the conversation's prompt cache nears its end (CACHE_ALARMS minutes before)."""
+        """Warn as the conversation's prompt cache nears its end (CACHE_ALARMS minutes before),
+        or keep it warm instead, for a while after the conversation's last use (KEEPALIVE_HOURS)."""
         sess = self.sessions.get(key)
         state = sess.state if sess else state
         alarm = self.alarms.get(key)
@@ -560,7 +561,14 @@ class Bot:
             alarm = None
         if not state.session_id or not state.last_api_at or (sess and sess.pending) or not self._assigned(key):
             return
-        left = costguard.cache_left(time.time(), state.last_api_at, self.ttl)
+        now = time.time()
+        left = costguard.cache_left(now, state.last_api_at, self.ttl)
+        if state.context_tokens >= self.cfg.wake_small and costguard.keeps_alive(
+            now, left, state.last_active, self.ttl, self.cfg.keepalive
+        ):  # the cache won't expire yet: no alarms
+            if costguard.keepalive_due(now, left, state.last_active, self.ttl, self.cfg.keepalive):
+                await self._session(key).keepalive()
+            return
         if left <= 0 and alarm and alarm["step"]:
             await self._cache_expired(key, state)
             return

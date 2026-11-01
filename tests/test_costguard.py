@@ -133,3 +133,20 @@ def test_usd_per_token_and_format(tmp_path):
     assert usd == pytest.approx(5e-6)
     assert costguard.format_cost(200_000, usd, 0.9, None) == "~0.90 €"
     assert costguard.format_cost(1, None, 0.9, None) == ""
+
+
+@pytest.mark.parametrize(
+    "since_use, left, window_h, kept, due",
+    [
+        (54 * 60, 300, 3, True, True),  # first keep-alive, 5 minutes before expiry
+        (54 * 60, 1200, 3, True, False),  # kept, but not yet
+        (54 * 60, 300, 1, False, False),  # 1 hour: the cache's own life, nothing kept
+        (2.5 * 3600, 300, 3, False, False),  # past the window: let it expire
+        (54 * 60, 0, 3, False, False),  # already cold
+    ],
+)
+def test_keepalive(since_use, left, window_h, kept, due):
+    now = 100_000.0
+    args = (now, left, now - since_use, 3600, window_h * 3600)
+    assert costguard.keeps_alive(*args) is kept
+    assert costguard.keepalive_due(*args) is due

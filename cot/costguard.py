@@ -57,6 +57,27 @@ def cache_left(now: float, last_api_at: float, ttl: int, margin: int = 60) -> fl
     return last_api_at + ttl - margin - now
 
 
+def keepalive_lead(ttl: int) -> int:
+    """Seconds before the cache expires at which a keep-alive goes: early enough to beat the
+    idle stop of the Claude process (a few minutes before a 1-hour cache ends)."""
+    return min(360, ttl // 5)
+
+
+def keeps_alive(now: float, left: float, last_used: float, ttl: int, window: float) -> bool:
+    """Whether a keep-alive will refresh this cache before it expires.
+
+    The cache is kept warm until about window seconds after the conversation was last used:
+    keep-alives go out during its first window - ttl seconds (the last one lasts a ttl more).
+    A window no longer than the cache's own life keeps nothing.
+    """
+    ping_at = now + left - keepalive_lead(ttl)
+    return window > ttl and left > 0 and ping_at - last_used < window - ttl
+
+
+def keepalive_due(now: float, left: float, last_used: float, ttl: int, window: float) -> bool:
+    return left <= keepalive_lead(ttl) and keeps_alive(now, left, last_used, ttl, window)
+
+
 def alarm_step(left: float, ttl: int, steps: tuple[int, ...], last: int | None) -> int | None:
     """The cache alarm (minutes left) due now, or None.
 

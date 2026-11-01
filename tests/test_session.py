@@ -165,3 +165,27 @@ async def test_claude_compacting_mid_turn_is_logged():
     assert sess.state.after_compact == 20_005
     assert sess.out.notices == ["🗜 Claude compacted the conversation (151k tokens of context) to go on"]
     await sess.close()
+
+
+async def test_keepalive_is_hidden_and_not_use():
+    state = ConvState(cwd="/tmp", session_id="sess-1", context_tokens=50_000, last_active=1000.0)
+    sess = make(state, ttl=3600)
+    FakeClient.scripts = [[answer(read=50_000, text="ok"), result()]]
+    await sess.keepalive()
+    await sess.keepalive()  # one is already queued
+    await until(lambda: sess.entries)
+    assert FakeClient.queries == [session_mod.KEEPALIVE_PROMPT]
+    assert sess.entries[0]["by"] == "keepalive" and sess.out.texts == []
+    assert sess.state.last_active == 1000.0 and state.pending == []
+    assert sess.state.last_api_at == pytest.approx(time.time(), abs=5)
+    await sess.close()
+
+
+async def test_message_with_a_keepalive_replaces_it():
+    sess = make(ttl=3600)
+    FakeClient.scripts = [[answer(text="hello"), result()]]
+    await sess.keepalive()
+    await sess.send("hi")
+    await until(lambda: sess.entries)
+    assert FakeClient.queries == ["hi"] and sess.entries[0]["by"] == "user" and sess.out.texts == ["hello"]
+    await sess.close()

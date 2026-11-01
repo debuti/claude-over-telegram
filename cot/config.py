@@ -34,6 +34,7 @@ class Config:
     wake: str  # auto | ask: who decides where a message to a cold conversation goes
     wake_small: int  # context tokens below which such a message just continues it
     eur_per_usd: float  # to show costs in euros
+    keepalive: float  # seconds after its last use a big conversation's cache is kept warm
 
 
 def _limits(spec: str, cpus: str, memory: str) -> dict[str, tuple[str, str]]:
@@ -123,5 +124,6 @@ def load(workdir: Path) -> Config:
         wake=wake,
         wake_small=int(os.environ.get("WAKE_SMALL_TOKENS") or 30_000),
         eur_per_usd=float(os.environ.get("EUR_PER_USD") or 0.87),
+        keepalive=float(os.environ.get("KEEPALIVE_HOURS") or 1) * 3600,
         docker_exclude=frozenset(x for x in os.environ.get("DOCKER_EXCLUDE", "").replace(" ", "").split(",") if x),
     )
