@@ -6,6 +6,7 @@ import pytest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from cot import bot as bot_mod
+from cot import triage
 from cot.bot import Bot
 from cot.store import ConvState, Store
 
@@ -53,13 +54,17 @@ class Query:
 @pytest.fixture
 def bot(tmp_path, monkeypatch):
     b = object.__new__(Bot)
-    b.cfg = SimpleNamespace(workdir=tmp_path)
+    b.cfg = SimpleNamespace(
+        workdir=tmp_path, wake="ask", wake_small=30_000, eur_per_usd=0.9, state_dir=tmp_path, cli_path="claude"
+    )
+    b.ttl = 3600
     b.store = Store(tmp_path / "sessions.json")
     b.store.put(KEY, ConvState(cwd=str(tmp_path), session_id="s1"))
     b.sessions, b.no_folder = {}, {}
     b.app = SimpleNamespace(bot=TgBot())
     b.out = Out()
     b.delivered = []
+    b.sess = SimpleNamespace(compact_next=False, stop=None)
     b.hold = True
     monkeypatch.setattr(Bot, "_output", lambda self, key: self.out)
     monkeypatch.setattr(Bot, "_should_hold", lambda self, key: self.hold)
@@ -72,8 +77,9 @@ def bot(tmp_path, monkeypatch):
 
     def session(self, key):
         async def send(text, ids):
-            self.delivered.append(text)
-        return SimpleNamespace(send=send, compact_next=False, stop=None)
+            self.delivered.append(("COMPACT " if self.sess.compact_next else "") + text)
+        self.sess.send = send
+        return self.sess
 
     monkeypatch.setattr(Bot, "_hold_prompt", hold_prompt)
     monkeypatch.setattr(Bot, "_new", new)
@@ -142,3 +148,64 @@ def test_holds_only_once_the_cache_is_cold(tmp_path, idle, connected, held):
     state = ConvState(cwd=str(tmp_path), session_id="s1", last_api_at=bot_mod.time.time() - idle)
     b.sessions = {KEY: SimpleNamespace(state=state, connected=connected, pending=False)}
     assert b._should_hold(KEY) is held
+
+
+@pytest.fixture
+def auto(bot, monkeypatch):
+    """WAKE=auto with a big context, Haiku stubbed: set bot.verdict to what it answers."""
+    bot.cfg.wake = "auto"
+    state = bot.store.get(KEY)
+    state.context_tokens = 180_000
+    bot.store.put(KEY, state)
+    bot.verdict, bot.asked = None, []
+
+    async def recent(cwd):
+        return [SimpleNamespace(session_id="s1", custom_title="Fix the parser", summary=None, first_prompt=None)]
+
+    async def decide(cli, cwd, title, history, message):
+        bot.asked.append((title, message))
+        return bot.verdict
+
+    monkeypatch.setattr(bot_mod.history, "recent", recent)
+    monkeypatch.setattr(triage, "excerpt", lambda sid: "User: fix it")
+    monkeypatch.setattr(triage, "decide", decide)
+    return bot
+
+
+async def test_auto_same_compacts_and_explains(auto):
+    auto.verdict = triage.Verdict(True, "sigue con el parser", 0.002)
+    await auto._submit(KEY, "y los tests?")
+    assert auto.asked == [("Fix the parser", "y los tests?")]
+    assert auto.delivered == ["COMPACT y los tests?"]
+    text, markup = auto.out.sent[0]
+    assert "Compacting" in text and "sigue con el parser" in text and "180k tokens" in text and markup is None
+    assert "Haiku for 0.002 €" in text
+
+
+async def test_auto_new_starts_one(auto):
+    auto.verdict = triage.Verdict(False, "otro tema", 0.002)
+    await auto._submit(KEY, "haz una web")
+    assert auto.delivered == ["NEW", "haz una web"]
+    assert "New conversation" in auto.out.sent[0][0] and "Fix the parser" in auto.out.sent[0][0]
+
+
+async def test_auto_small_context_just_continues(auto):
+    state = auto.store.get(KEY)
+    state.context_tokens = 10_000
+    auto.store.put(KEY, state)
+    await auto._submit(KEY, "hola")
+    assert auto.delivered == ["hola"] and auto.asked == [] and auto.out.sent == []
+
+
+async def test_auto_without_verdict_asks(auto):
+    await auto._submit(KEY, "hola")
+    assert auto.delivered == [] and len(auto.out.sent) == 1 and auto.out.sent[0][1] is not None
+
+
+@pytest.mark.parametrize(
+    "answer, parsed",
+    [("SAME: same task", (True, "same task")), ("new - otro tema", (False, "otro tema")),
+     ("**NEW**: x", (False, "x")), ("maybe", None)],
+)
+def test_parse(answer, parsed):
+    assert triage.parse(answer) == parsed

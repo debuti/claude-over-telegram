@@ -31,6 +31,9 @@ class Config:
     api_key: bool  # ANTHROPIC_API_KEY set: billed per use, 5-minute cache by default
     cache_alarms: tuple[int, ...]  # minutes before the cache expires at which to warn; (): off
     debug_ttl: int  # COT_DEBUG_TTL_SECONDS: the TTL the bot assumes, for testing; 0: off
+    wake: str  # auto | ask: who decides where a message to a cold conversation goes
+    wake_small: int  # context tokens below which such a message just continues it
+    eur_per_usd: float  # to show costs in euros
 
 
 def _limits(spec: str, cpus: str, memory: str) -> dict[str, tuple[str, str]]:
@@ -88,6 +91,9 @@ def load(workdir: Path) -> Config:
     cache_ttl = (os.environ.get("CACHE_TTL") or "auto").strip().lower()
     if cache_ttl not in ("auto", "5m", "1h"):
         raise SystemExit(f"CACHE_TTL must be auto, 5m or 1h, not {cache_ttl}")
+    wake = (os.environ.get("WAKE") or "auto").strip().lower()
+    if wake not in ("auto", "ask"):
+        raise SystemExit(f"WAKE must be auto or ask, not {wake}")
 
     return Config(
         telegram_token=token,
@@ -114,5 +120,8 @@ def load(workdir: Path) -> Config:
         api_key=bool(os.environ.get("ANTHROPIC_API_KEY")),
         cache_alarms=_minutes(os.environ.get("CACHE_ALARMS", "30,15,10,5,2,1")),
         debug_ttl=int(os.environ.get("COT_DEBUG_TTL_SECONDS") or 0),
+        wake=wake,
+        wake_small=int(os.environ.get("WAKE_SMALL_TOKENS") or 30_000),
+        eur_per_usd=float(os.environ.get("EUR_PER_USD") or 0.87),
         docker_exclude=frozenset(x for x in os.environ.get("DOCKER_EXCLUDE", "").replace(" ", "").split(",") if x),
     )

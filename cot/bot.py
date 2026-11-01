@@ -18,7 +18,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, container, costguard, history, permissions, server, uploads, usage, usagelog
+from . import __version__, container, costguard, history, permissions, server, triage, uploads, usage, usagelog
 from .config import Config
 from .output import TelegramOutput
 from .render import esc
@@ -284,7 +284,7 @@ class Bot:
         if check and self._should_hold(key):
             state.held.append({"text": text, "ids": ids or []})
             self.store.put(key, state)
-            await self._ask_hold(key)
+            await self._wake(key)
             return
         sess = self._session(key)
         await sess.send(text, ids)
@@ -301,6 +301,75 @@ class Bot:
         if not state.session_id or (sess and (sess.connected or sess.pending)):
             return False
         return costguard.is_cold(time.time(), state.last_api_at or state.last_active, self.ttl)
+
+    async def _wake(self, key: Key) -> None:
+        """Held messages to a conversation whose cache went cold: decide where they go (WAKE=auto)
+        and say why, or ask. Haiku decides; if it can't, the user is asked."""
+        decided = False
+        if self.cfg.wake == "auto":
+            try:
+                decided = await self._triage(key)
+            except Exception:
+                log.exception("triage failed")
+        if not decided:
+            await self._ask_hold(key)
+
+    async def _triage(self, key: Key) -> bool:
+        """Small context: just continue. Otherwise compact and continue when the message goes on
+        with the conversation, or start a new one when it doesn't. False if Haiku gave no answer."""
+        state = self._state(key)
+        context = state.context_tokens or (await asyncio.to_thread(transcript_context, state.session_id))[0]
+        if context < self.cfg.wake_small:  # re-sending it costs little: no need to decide anything
+            await self._release(key)
+            return True
+        sessions = await history.recent(state.cwd)
+        title = next((history.title(s) for s in sessions if s.session_id == state.session_id), "")
+        recent = await asyncio.to_thread(triage.excerpt, state.session_id)
+        message = "\n".join(m["text"] for m in state.held)
+        cli = self.cfg.cli_path or container.bundled_cli()
+        verdict = await triage.decide(cli, self.cfg.state_dir, title, recent, message)
+        if verdict is None:
+            return False
+        state = self._state(key)
+        if not state.held:  # delivered or dropped meanwhile (/new, /resume, /stop)
+            return True
+        await self._output(key).send_html(await self._wake_text(state, context, title, verdict))
+        if verdict.same:
+            self._session(key).compact_next = True
+        else:
+            await self._new(key)
+        await self._release(key)
+        return True
+
+    async def _wake_text(self, state: ConvState, context: int, title: str, verdict: triage.Verdict) -> str:
+        """Why the message went where it did, with what each way costs."""
+        log_path = self.cfg.state_dir / "usage.jsonl"
+        calibration = await asyncio.to_thread(costguard.Calibration.from_log, log_path)
+        usd = await asyncio.to_thread(costguard.usd_per_token, log_path)
+        costs = costguard.wake_costs(context, state.after_compact, self.ttl)
+        kilo = costguard.kilo
+
+        def price(equivalent: float) -> str:
+            text = costguard.format_cost(equivalent, usd, self.cfg.eur_per_usd, calibration)
+            return f" ({esc(text)})" if text else ""
+
+        reason = f": <i>{esc(verdict.reason)}</i>" if verdict.reason else ""
+        keep = f"Its cache expired, so continuing it as it is would re-send {kilo(context)} tokens{price(costs.keep)}"
+        if verdict.same:
+            text = (
+                f"🗜 <b>Compacting, then your message</b>: it goes on with this conversation{reason}\n\n"
+                f"{keep}, and every later step would re-read them. Compacting costs about that once"
+                f"{price(costs.compact)}; after it, each step re-reads ~{kilo(costs.summary)}."
+            )
+        else:
+            old = f" (<i>{esc(title)}</i>)" if title else ""
+            text = (
+                f"🆕 <b>New conversation for your message</b>: it looks like a different task{reason}\n\n"
+                f"{keep}; a new one starts at ~{kilo(costguard.STARTUP)} tokens{price(costs.new)}. "
+                f"/list takes you back to the old one{old}."
+            )
+        haiku = verdict.cost_usd * self.cfg.eur_per_usd
+        return text + f"\n\n<i>Decided by Haiku for {haiku:.3f} €. WAKE=ask asks instead.</i>"
 
     async def _ask_hold(self, key: Key) -> None:
         """The warning for held messages; without it nothing would deliver them, so they go on."""

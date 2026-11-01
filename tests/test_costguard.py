@@ -116,3 +116,20 @@ def test_alarm_step_skips_steps_as_long_as_the_cache():
 
 def test_cache_left():
     assert costguard.cache_left(1000 + 600, 1000, 3600) == 3600 - 60 - 600
+
+
+def test_wake_costs():
+    c = costguard.wake_costs(100_000, 0, 3600)
+    assert c.keep == 200_000 and c.new == costguard.STARTUP * 2
+    assert c.summary == costguard.SUMMARY and c.compact > c.keep
+    assert costguard.wake_costs(100_000, 8_000, 300).summary == 8_000
+
+
+def test_usd_per_token_and_format(tmp_path):
+    log = tmp_path / "usage.jsonl"
+    line = json.dumps({"cost": 0.5, "tokens": {"input_tokens": 100_000}, "ttl_s": 3600})
+    log.write_text((line + "\n") * 12)
+    usd = costguard.usd_per_token(log)
+    assert usd == pytest.approx(5e-6)
+    assert costguard.format_cost(200_000, usd, 0.9, None) == "~0.90 €"
+    assert costguard.format_cost(1, None, 0.9, None) == ""

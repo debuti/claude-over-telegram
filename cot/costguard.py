@@ -153,3 +153,70 @@ def format_estimate(e: Estimate) -> str:
         pct = f"{e.percent:.0f}" if e.percent >= 1 else f"{e.percent:.1f}"
         parts.append(f"~{pct}% of your 5-hour window")
     return " · ".join(parts)
+
+
+def usd_per_token(path: Path) -> float | None:
+    """Dollars one equivalent token cost in the newest turns of usage.jsonl (median), or None.
+
+    What the CLI reports per turn: on a subscription it is what the turn would have cost on
+    the API, a yardstick rather than a bill (the % of the window is what counts there).
+    """
+    ratios: list[float] = []
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            e = json.loads(line)
+            equiv = weighted(e.get("tokens") or {}, e.get("ttl_s") or 3600)
+            cost = e.get("cost") or 0
+        except (ValueError, AttributeError, TypeError):
+            continue
+        if equiv > 0 and cost > 0:
+            ratios.append(cost / equiv)
+        if len(ratios) >= CALIBRATION_ENTRIES:
+            break
+    return statistics.median(ratios) if len(ratios) >= CALIBRATION_MIN else None
+
+
+# A new conversation's first request (Claude Code's system prompt, tools and skills; measured
+# on 2026-10-29), and what a compaction leaves when the conversation's own isn't known yet.
+STARTUP = 19_000
+SUMMARY = 20_000
+
+
+@dataclass(frozen=True)
+class WakeCosts:
+    """Equivalent tokens of each way to go on with a conversation whose cache went cold."""
+
+    context: int
+    summary: int  # what compacting leaves, re-read by every later step instead of the context
+    keep: float  # continue as it is: the whole context written to the cache again
+    compact: float  # summarise it (reading it all once, writing the summary), then go on from that
+    new: float  # a new conversation's first request
+
+
+def wake_costs(context: int, after_compact: int, ttl: int) -> WakeCosts:
+    w = write_price(ttl)
+    summary = after_compact or SUMMARY
+    return WakeCosts(
+        context=context,
+        summary=summary,
+        keep=context * w,
+        compact=context * w + summary * OUTPUT + summary * w,
+        new=STARTUP * w,
+    )
+
+
+def format_cost(
+    equivalent: float, usd: float | None, eur_per_usd: float, calibration: Calibration | None
+) -> str:
+    """E.g. "~0.95 € · ~3% of your 5-hour window"; "" when neither is known."""
+    parts = []
+    if usd:
+        parts.append(f"~{equivalent * usd * eur_per_usd:.2f} €")
+    if calibration:
+        pct = equivalent * calibration.percent_per_token
+        parts.append(f"~{pct:.0f}% of your 5-hour window" if pct >= 1 else f"~{pct:.1f}% of your 5-hour window")
+    return " · ".join(parts)

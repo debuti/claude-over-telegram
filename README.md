@@ -104,6 +104,9 @@ All settings live in `.env` next to the code (see `.env.example`):
 | `PERMISSION_MODE`  | `auto`     | Initial permission mode: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
 | `AUTO_COMPACT_TOKENS` | `150000` | Context size that compacts a conversation, also in the middle of a task (passed to Claude as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`); `0` turns it off |
 | `CACHE_TTL`        | `auto`     | Prompt cache lifetime: `auto` (1 hour on a subscription, 5 minutes with an API key), `5m` or `1h` (passed to Claude too) |
+| `WAKE`             | `auto` | Where a message to a conversation whose cache went cold goes: `auto` lets Haiku decide (compact and continue, or a new conversation) and explains why; `ask` asks with buttons |
+| `WAKE_SMALL_TOKENS` | `30000` | Below this context size such a message just continues the conversation, without deciding anything |
+| `EUR_PER_USD`      | `0.87` | Exchange rate for the costs shown in euros (the CLI reports dollars; on a subscription they are what the API would have charged) |
 | `CACHE_ALARMS`     | `30,15,10,5,2,1` | Minutes before a conversation's prompt cache expires at which the bot warns in it (with what the next message will cost once it's gone); `off` turns them off. Each alarm replaces the one before, and the last goes once the conversation is used again. When the cache does expire, a silent message says so, with the plan usage |
 | `SANDBOX_DOCKER`   | `true`     | Run each conversation's Claude in its own container (see [Confinement](#confinement)) |
 | `DOCKER_CPUS`      | `2`        | CPUs each container may use                                     |
@@ -245,10 +248,16 @@ Idle conversations stop their Claude process after 55 minutes, just before the
 subscription's 1-hour prompt cache expires (30 minutes with an `ANTHROPIC_API_KEY`,
 whose cache lasts 5), or once the background commands Claude is waiting for end
 (6 hours at most). The next message
-after that doesn't just carry on: the bot holds it and asks whether to continue
-that conversation, compact it and continue, switch to another one from the list
-or start a new one, since every message to a long conversation re-sends all of
-it. A conversation whose context passes `AUTO_COMPACT_TOKENS` (150k) is compacted
+after that doesn't just carry on, since every message to a long conversation
+re-sends all of it once its cache is gone. If the context is small
+(`WAKE_SMALL_TOKENS`, 30k) it simply continues. Otherwise Haiku reads the
+conversation's title, its last exchanges and the new message, and decides: a
+message that goes on with the conversation compacts it and continues, one about
+something else starts a new conversation (when unsure, it continues). The bot says
+which and why, with what each way costs in tokens, euros and share of the 5-hour
+window. If Haiku can't answer, or with `WAKE=ask`, the bot holds the message and
+asks instead: continue, compact and continue, another conversation from the list,
+or a new one. A conversation whose context passes `AUTO_COMPACT_TOKENS` (150k) is compacted
 (`/compact`) before its next message, or before its process stops, while the cache
 still holds it. Claude itself compacts at that size too, also in the middle of a long
 task: otherwise it would wait until 967k (Opus has a 1M-token window), and each of a
@@ -387,6 +396,7 @@ Issues and pull requests are welcome. The code is small:
 | `cot/usage.py`       | Plan usage for `/usage`                                    |
 | `cot/usagelog.py`    | Per-turn log of cost and plan usage (`state/usage.jsonl`) |
 | `cot/costguard.py`   | What the next message costs: cache TTL, cold/warm estimates |
+| `cot/triage.py`      | Haiku decides where a message to a cold conversation goes |
 | `cot/uploads.py`, `cot/tg_tools.py` | Files from and to Telegram                  |
 | `cot/store.py`, `cot/config.py`     | Saved conversations, settings               |
 
