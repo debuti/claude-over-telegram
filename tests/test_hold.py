@@ -205,7 +205,9 @@ async def test_auto_without_verdict_asks(auto):
 @pytest.mark.parametrize(
     "answer, parsed",
     [("SAME: same task", (True, "same task")), ("new - otro tema", (False, "otro tema")),
-     ("**NEW**: x", (False, "x")), ("maybe", None)],
+     ("**NEW**: x", (False, "x")), ("maybe", None),
+     ("Es un cambio de tema.\nNEW", (False, "Es un cambio de tema.")),
+     ("sigue\ncon el parser\n**SAME**", (True, "sigue con el parser"))],
 )
 def test_parse(answer, parsed):
     assert triage.parse(answer) == parsed

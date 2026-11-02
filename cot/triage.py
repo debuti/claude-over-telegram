@@ -27,14 +27,18 @@ EXCHANGES = 6
 CHARS = 600
 
 SYSTEM = (
-    "You route a chat message. The user comes back, after a while, to a conversation with a "
-    "coding assistant. Decide whether their new message goes on with that conversation (SAME: "
-    "same task, a follow-up, a reference to it, or too short or vague to tell) or starts an "
-    "unrelated task (NEW). When unsure, answer SAME. Reply with one line only: SAME or NEW, a "
-    "colon, and the reason in at most 15 words, in the language of the new message."
+    "You route a chat message. The user comes back, after a while, to a conversation with an "
+    "assistant (about code or anything else). Decide whether their new message goes on with "
+    "that conversation (SAME: same task or subject, a follow-up, a reference to it) or turns to "
+    "an unrelated task or subject (NEW). Judge by subject, not by the chat it was sent in: a "
+    "general chat still starts a new topic when the subject changes. Answer SAME without a clear "
+    "link only when the message is too short or vague to tell. First write the reason in at "
+    "most 15 words, in the language of the new message; then, on a last line of its own, only "
+    "SAME or NEW."
 )
 
 ANSWER = re.compile(r"^\W*(SAME|NEW)\W*[:\-–—]?\s*(.*)$", re.IGNORECASE | re.DOTALL)
+VERDICT = re.compile(r"^\W*(SAME|NEW)\W*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,10 @@ def excerpt(session_id: str) -> str:
 
 
 def parse(answer: str) -> tuple[bool, str] | None:
+    """The verdict on the last line after the reason, or (older form) "SAME: reason"."""
+    lines = [line.strip() for line in answer.strip().splitlines() if line.strip()]
+    if lines and (m := VERDICT.match(lines[-1])):
+        return m.group(1).upper() == "SAME", " ".join(" ".join(lines[:-1]).split())
     m = ANSWER.match(answer.strip())
     if not m:
         return None
