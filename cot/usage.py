@@ -127,3 +127,16 @@ def render(data: dict) -> str:
     if len(lines) == 1:
         lines.append("no limits reported")
     return "\n\n".join(lines)
+
+
+def blocked(data: dict) -> str | None:
+    """When the plan stops Claude (a 5-hour or weekly limit used up, with no extra usage left):
+    the latest of those limits' resets (ISO, or "" if unknown); None if Claude can run."""
+    extra = data.get("extra_usage") or {}
+    if extra.get("is_enabled") and (extra.get("utilization") or 0) < 100:
+        return None
+    full = [lim for lim in data.get("limits") or []
+            if lim.get("kind") in ("session", "weekly_all") and (lim.get("percent") or 0) >= 100]
+    if not full:
+        return None
+    return max(lim.get("resets_at") or "" for lim in full)

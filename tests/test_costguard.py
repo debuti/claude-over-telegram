@@ -150,3 +150,25 @@ def test_keepalive(since_use, left, window_h, kept, due):
     args = (now, left, now - since_use, 3600, window_h * 3600)
     assert costguard.keeps_alive(*args) is kept
     assert costguard.keepalive_due(*args) is due
+
+
+@pytest.mark.parametrize(
+    "limits, extra, out",
+    [
+        ([{"kind": "session", "percent": 40}], None, None),
+        ([{"kind": "session", "percent": 100, "resets_at": "2026-11-02T18:00Z"}], None, "2026-11-02T18:00Z"),
+        (
+            [{"kind": "session", "percent": 100, "resets_at": "A"},
+             {"kind": "weekly_all", "percent": 100, "resets_at": "B"}],
+            None,
+            "B",
+        ),
+        ([{"kind": "weekly_opus", "percent": 100}], None, None),
+        ([{"kind": "session", "percent": 100}], {"is_enabled": True, "utilization": 20}, None),
+        ([{"kind": "session", "percent": 100}], {"is_enabled": True, "utilization": 100}, ""),
+    ],
+)
+def test_usage_blocked(limits, extra, out):
+    from cot import usage
+
+    assert usage.blocked({"limits": limits, "extra_usage": extra}) == out

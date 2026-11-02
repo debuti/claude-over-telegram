@@ -84,6 +84,8 @@ class Bot:
         # The cache alarm last sent per conversation: {"at": last_api_at it counts from, "step", "msg_id"}.
         self.alarms: dict[Key, dict] = {}
         self._alarm_task: asyncio.Task | None = None
+        # The plan usage the alarms last fetched: (time, data or None if unavailable).
+        self._plan: tuple[float, dict | None] = (0.0, None)
         self.usage_log = usagelog.UsageLog(cfg.state_dir / "usage.jsonl", cfg.cli_path or container.bundled_cli())
         self.app = (
             Application.builder()
@@ -566,14 +568,20 @@ class Bot:
         if state.context_tokens >= self.cfg.wake_small and costguard.keeps_alive(
             now, left, state.last_active, self.ttl, self.cfg.keepalive
         ):  # the cache won't expire yet: no alarms
-            if costguard.keepalive_due(now, left, state.last_active, self.ttl, self.cfg.keepalive):
+            if costguard.keepalive_due(
+                now, left, state.last_active, self.ttl, self.cfg.keepalive
+            ) and not await self._blocked():
                 await self._session(key).keepalive()
             return
         if left <= 0 and alarm and alarm["step"]:
+            if await self._blocked():  # nothing to do about it until the limit resets
+                await self._delete_alarm(key)
+                self.alarms[key] = {"at": state.last_api_at, "step": 0, "msg_id": None}
+                return
             await self._cache_expired(key, state)
             return
         step = costguard.alarm_step(left, self.ttl, self.cfg.cache_alarms, alarm and alarm["step"])
-        if step is None:
+        if step is None or await self._blocked():  # no message could reach Claude in time anyway
             return
         await self._delete_alarm(key)
         calibration = await asyncio.to_thread(costguard.Calibration.from_log, self.cfg.state_dir / "usage.jsonl")
@@ -595,7 +603,21 @@ class Bot:
         text = f"🧊 Cache expired{asleep}. The next message re-sends {costguard.kilo(state.context_tokens)} tokens."
         if not self.cfg.api_key:
             text += "\n\n" + await self._usage_text()
-        await self._output(key).send_html(esc(text), silent=True)
+        await self._output(key).send_html(esc(text))
+
+    async def _blocked(self) -> bool:
+        """Whether a plan limit stops Claude now (fetched at most once a minute; False if unknown)."""
+        if self.cfg.api_key:
+            return False
+        at, data = self._plan
+        if time.time() - at > 60:
+            try:
+                data = await usage.fetch(self.cfg.cli_path or container.bundled_cli())
+            except Exception as e:
+                log.debug("plan usage not available for the alarms: %s", e)
+                data = None
+            self._plan = (time.time(), data)
+        return bool(data) and usage.blocked(data) is not None
 
     async def _usage_text(self) -> str:
         try:
