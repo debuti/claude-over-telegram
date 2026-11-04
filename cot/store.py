@@ -32,6 +32,8 @@ class ConvState:
     held: list[dict] = field(default_factory=list)
     # While a plan limit stops Claude: epoch seconds of when to look again. Held messages wait for it.
     limit_until: float = 0.0
+    # A plan limit cut Claude's work short: when it lifts, whether Claude carries on is asked.
+    limit_cut: bool = False
     # The warning whose buttons are live: {"nonce", "msg_id", "kind"}; at most one per conversation.
     prompt: dict | None = None
 

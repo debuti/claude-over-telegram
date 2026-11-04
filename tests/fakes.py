@@ -19,8 +19,9 @@ def limit_event(resets_at):
 
 def limit_hit():
     """What the CLI answers when a plan limit turns a call down."""
+    usage = {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0}
     return AssistantMessage([TextBlock("You've hit your session limit · resets 6pm (UTC)")], "<synthetic>",
-                            error="rate_limit")
+                            usage=usage, error="rate_limit")
 
 
 def result(is_error=False, terminal_reason=None, cost=0.01):

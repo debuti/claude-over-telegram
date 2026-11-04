@@ -64,6 +64,12 @@ COMPACT_BUFFER = 33_000
 # A plan limit that doesn't say when it resets: seconds until the bot looks again.
 LIMIT_RETRY = 5 * 60
 
+# What goes to Claude, ahead of any waiting messages, to carry on with a turn a limit cut short.
+CONTINUE_PROMPT = (
+    "[From the Telegram bot: a plan limit cut your last turn short and has now lifted. "
+    "Carry on with what you were doing.]"
+)
+
 MODELS = {
     "claude-fable-5-1": "Fable 5.1",
     "claude-opus-5-5": "Opus 5.5",
@@ -233,7 +239,7 @@ class Bot:
         sess.on_turn_start = lambda: self.usage_log.turn_started(key)
         sess.on_turn_end = lambda entry: self._log_turn(key, sess, entry)
         sess.on_turn_failed = lambda: self.usage_log.turn_failed(key)
-        sess.on_limited = lambda items, resets: self._on_limited(key, items, resets)
+        sess.on_limited = lambda items, resets, cut: self._on_limited(key, items, resets, cut)
         sess.start()
         self.sessions[key] = sess
         if state.pending:
@@ -284,7 +290,8 @@ class Bot:
                 )
             return
         state = self._state(key)
-        if state.held:  # a warning or a plan limit is already holding some: this one waits with them
+        # A warning or a plan limit is already holding some, or asking about the cut turn: this one waits too.
+        if state.held or (state.limit_cut and not state.limit_until):
             state.held.append({"text": text, "ids": ids or []})
             self.store.put(key, state)
             return
@@ -312,19 +319,22 @@ class Bot:
             return False
         return costguard.is_cold(time.time(), state.last_api_at or state.last_active, self.ttl)
 
-    async def _on_limited(self, key: Key, items: list[dict], resets: float | None) -> None:
+    async def _on_limited(self, key: Key, items: list[dict], resets: float | None, cut: bool = False) -> None:
         """A plan limit stops Claude: messages wait, in order, until _check_limit sees it gone."""
         state = self._state(key)
         state.held = items + state.held
         state.limit_until = max(state.limit_until, resets or 0.0) or time.time() + LIMIT_RETRY
+        state.limit_cut = state.limit_cut or cut
         self.store.put(key, state)
         self._plan = (0.0, None)  # it didn't foresee this, or the next look is near the reset
-        if items:
-            n = len(state.held)
+        n = len(state.held)
+        waiting = [f"{n} message{'s' * (n > 1)} waiting"] if n else []
+        what = " and ".join((["Claude's work was cut short"] if state.limit_cut else []) + waiting)
+        if items or cut:
             when = f", {usage.until(resets)}" if resets else ""
             await self._output(key).notice(
-                f"⏸ Plan limit reached{when}. {n} message{'s' * (n > 1)} waiting; once it lifts "
-                "I'll ask for your OK to send them. /stop drops them."
+                f"⏸ Plan limit reached{when}. {what}; once it lifts I'll ask for your OK to go on. "
+                "/stop drops it."
             )
 
     async def _check_limit(self, key: Key, state: ConvState) -> None:
@@ -333,14 +343,28 @@ class Bot:
         state = sess.state if sess else state
         if not state.limit_until or time.time() < state.limit_until or await self._blocked():
             return
-        n = len(state.held)
-        previews = "\n".join(f"• <i>{esc(m['text'][:80])}</i>" for m in state.held[:5])
-        rows = [[("▶️ Send", "send"), ("🗑 Drop", "drop")]]
-        text = f"✅ The plan limit has lifted. Send {n} waiting message{'s' * (n > 1)} to Claude?\n\n{previews}"
-        if n and not await self._prompt(key, "limit", text, rows):
-            return  # looks again in a moment: sending them takes the user's OK
+        if (state.held or state.limit_cut) and not await self._prompt(key, "limit", *self._limit_prompt(key, state)):
+            return  # looks again in a moment: going on takes the user's OK
         state.limit_until = 0.0
         self.store.put(key, state)
+
+    def _limit_prompt(self, key: Key, state: ConvState) -> tuple[str, list[list[tuple[str, str]]]]:
+        """The question once the limit is gone. Going on with a cut turn stays in this conversation,
+        so what the cold cache costs is decided here, instead of after it."""
+        n = len(state.held)
+        waiting = f"{n} waiting message{'s' * (n > 1)}"
+        previews = "\n".join(f"• <i>{esc(m['text'][:80])}</i>" for m in state.held[:5])
+        if not state.limit_cut:
+            text = f"✅ The plan limit has lifted. Send {waiting} to Claude?\n\n{previews}"
+            return text, [[("▶️ Send", "send"), ("🗑 Drop", "drop")]]
+        text = "✅ The plan limit has lifted. It had cut Claude's work short: carry on with it"
+        text += f", sending {waiting} too?\n\n{previews}" if n else "?"
+        rows = [[("▶️ Continue", "send"), ("🗑 Leave it", "drop")]]
+        if self._should_hold(key) and state.context_tokens >= self.cfg.wake_small:
+            kilo = costguard.kilo(state.context_tokens)
+            text += f"\n\nIts cache expired: continuing re-sends {kilo} tokens, and every later step re-reads them."
+            rows.insert(1, [("🗜 Compact it and continue", "compact")])
+        return text, rows
 
     async def _wake(self, key: Key) -> None:
         """Held messages to a conversation whose cache went cold: decide where they go (WAKE=auto)
@@ -443,10 +467,16 @@ class Bot:
         state = self._state(key)
         if kind == "limit":
             if action == "drop":
-                state.held = []
+                state.held, state.limit_cut = [], False
                 self.store.put(key, state)
                 return
-            if self._should_hold(key):  # the wait left the cache cold: where they go is still open
+            if state.limit_cut:
+                state.limit_cut = False
+                state.held.insert(0, {"text": CONTINUE_PROMPT, "ids": []})
+                self.store.put(key, state)
+                if action == "compact":
+                    self._session(key).compact_next = True
+            elif self._should_hold(key):  # the wait left the cache cold: where they go is still open
                 await self._wake(key)
                 return
         if kind == "wake":
@@ -465,6 +495,9 @@ class Bot:
         """Deliver the held messages where the conversation now stands, without asking again."""
         await self._drop_prompt(key)
         state = self._state(key)
+        if state.limit_cut and not state.limit_until:  # the question is still open: asked again
+            state.limit_until = time.time()
+            self.store.put(key, state)
         if state.limit_until:  # nothing can reach Claude yet: _check_limit asks when it can
             return
         held, state.held = state.held, []
@@ -618,7 +651,7 @@ class Bot:
             alarm = None
         if not state.session_id or not state.last_api_at or (sess and sess.pending) or not self._assigned(key):
             return
-        if state.limit_until:
+        if state.limit_until or state.limit_cut:
             return
         now = time.time()
         left = costguard.cache_left(now, state.last_api_at, self.ttl)
@@ -813,6 +846,7 @@ class Bot:
             await sess.close()
         state = self._state(key)
         state.session_id = None
+        state.limit_cut = False  # that work stays in the old conversation
         state.cost_usd = 0.0
         state.context_tokens = state.after_compact = 0
         state.last_api_at = 0.0
@@ -862,6 +896,7 @@ class Bot:
         if sess:
             await sess.close()
         state.session_id = session_id
+        state.limit_cut = False  # that work stays in the old conversation
         state.cost_usd = await asyncio.to_thread(transcript_cost, session_id)
         state.context_tokens, state.last_api_at = await asyncio.to_thread(transcript_context, session_id)
         state.after_compact = 0
@@ -928,14 +963,19 @@ class Bot:
         sess = self.sessions.get(key)
         running, dropped = await sess.stop() if sess else (False, 0)
         state = self._state(key)
-        if state.held:  # held back by a warning: dropped too
+        cut = state.limit_cut
+        if state.held or cut:  # held back by a warning, or waiting for a plan limit: dropped too
             dropped += len(state.held)
-            state.held = []
+            state.held, state.limit_cut = [], False
             self.store.put(key, state)
         await self._drop_prompt(key)
         if not running:
             # When a turn was running, its end reports "Stopped" itself.
             msg = f"🛑 Dropped {dropped} queued message(s)" if dropped else "Nothing to stop"
+            if cut:
+                msg = "🛑 Claude won't carry on with the work the limit cut short" + (
+                    f"\nDropped {dropped} queued message(s)" if dropped else ""
+                )
             await self._output(key).notice(msg)
         elif dropped:
             await self._output(key).notice(f"Dropped {dropped} queued message(s)")

@@ -7,7 +7,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from cot import bot as bot_mod
 from cot import triage
-from cot.bot import Bot
+from cot.bot import CONTINUE_PROMPT, Bot
 from cot.store import ConvState, Store
 
 KEY = (1, None)
@@ -309,3 +309,88 @@ async def test_limit_with_nothing_waiting_ends_silently(bot):
     state.limit_until = 1.0
     await bot._check_limit(KEY, state)
     assert state.limit_until == 0 and bot.out.sent == []
+
+
+async def test_cut_turn_with_nothing_waiting_offers_to_continue(bot):
+    await bot._on_limited(KEY, [], 2_000_000_000.0, cut=True)
+    assert "cut short" in bot.out.notices[0]
+    state = bot.store.get(KEY)
+    state.limit_until = 1.0
+    bot.hold = False
+    await bot._check_limit(KEY, state)
+    text, markup = bot.out.sent[0]
+    assert "carry on" in text and state.limit_cut and state.limit_until == 0
+    assert [b.text for row in markup.inline_keyboard for b in row] == ["▶️ Continue", "🗑 Leave it"]
+    query, rest = tap(bot, "send")
+    await bot._on_guard(KEY, query, rest)
+    assert bot.delivered == [CONTINUE_PROMPT] and not state.limit_cut
+
+
+async def test_continue_goes_ahead_of_the_waiting_messages_and_skips_the_triage(bot):
+    await bot._on_limited(KEY, [{"text": "one", "ids": []}], None, cut=True)
+    state = bot.store.get(KEY)
+    state.limit_until = 1.0
+    bot.hold = True  # a cold cache: the choice is in this prompt, none comes after it
+    await bot._check_limit(KEY, state)
+    assert "sending 1 waiting message too" in bot.out.sent[0][0]
+    query, rest = tap(bot, "send")
+    await bot._on_guard(KEY, query, rest)
+    assert bot.delivered == [CONTINUE_PROMPT, "one"] and state.prompt is None
+
+
+async def test_cut_turn_with_a_big_cold_context_offers_to_compact(bot):
+    await bot._on_limited(KEY, [], None, cut=True)
+    state = bot.store.get(KEY)
+    state.limit_until, state.context_tokens = 1.0, 180_000
+    await bot._check_limit(KEY, state)
+    text, markup = bot.out.sent[0]
+    assert "180k tokens" in text and "🗜 Compact it and continue" in [b.text for r in markup.inline_keyboard for b in r]
+    query, rest = tap(bot, "compact")
+    await bot._on_guard(KEY, query, rest)
+    assert bot.delivered == ["COMPACT " + CONTINUE_PROMPT]
+
+
+async def test_leaving_the_cut_turn_forgets_it_and_its_messages(bot):
+    await bot._on_limited(KEY, [{"text": "one", "ids": []}], None, cut=True)
+    state = bot.store.get(KEY)
+    state.limit_until = 1.0
+    await bot._check_limit(KEY, state)
+    query, rest = tap(bot, "drop")
+    await bot._on_guard(KEY, query, rest)
+    assert bot.delivered == [] and state.held == [] and not state.limit_cut
+
+
+async def test_message_sent_while_the_cut_turn_prompt_is_live_waits_for_it(bot):
+    await bot._on_limited(KEY, [], None, cut=True)
+    state = bot.store.get(KEY)
+    state.limit_until, bot.hold = 1.0, False
+    await bot._check_limit(KEY, state)
+    await bot._submit(KEY, "one")
+    assert bot.delivered == []
+    query, rest = tap(bot, "send")
+    await bot._on_guard(KEY, query, rest)
+    assert bot.delivered == [CONTINUE_PROMPT, "one"]
+
+
+async def test_cut_turn_survives_a_restart(bot, tmp_path):
+    await bot._on_limited(KEY, [], 2_000_000_000.0, cut=True)
+    saved = Store(tmp_path / "sessions.json").get(KEY)
+    assert saved.limit_cut and saved.limit_until == 2_000_000_000.0
+
+
+async def test_stop_forgets_the_cut_turn(bot, monkeypatch):
+    await bot._on_limited(KEY, [], None, cut=True)
+    monkeypatch.setattr(Bot, "_key", staticmethod(lambda u: KEY))
+    await bot._cmd_stop(SimpleNamespace(), None)
+    assert not bot.store.get(KEY).limit_cut and "won't carry on" in bot.out.notices[-1]
+
+
+async def test_prompt_of_a_cut_turn_taken_off_is_asked_again(bot):
+    await bot._on_limited(KEY, [{"text": "one", "ids": []}], None, cut=True)
+    state = bot.store.get(KEY)
+    state.limit_until, bot.hold = 1.0, False
+    await bot._check_limit(KEY, state)
+    await bot._release(KEY)  # /resume of this same conversation
+    assert bot.delivered == [] and state.prompt is None
+    await bot._check_limit(KEY, state)
+    assert state.prompt["kind"] == "limit" and len(state.held) == 1

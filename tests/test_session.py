@@ -195,8 +195,8 @@ def limited(sess):
     """Collect what the session hands back when a plan limit stops Claude."""
     sess.limits = []
 
-    async def on_limited(items, resets):
-        sess.limits.append(([item["text"] for item in items], resets))
+    async def on_limited(items, resets, cut):
+        sess.limits.append(([item["text"] for item in items], resets, cut))
 
     sess.on_limited = on_limited
     return sess
@@ -268,7 +268,7 @@ async def test_limit_hands_back_the_message_it_turned_down_and_the_queue():
     await sess.send("two")
     await sess._client.interrupt()
     await until(lambda: sess.limits)
-    assert sess.limits == [(["one", "two"], 1234)]
+    assert sess.limits == [(["one", "two"], 1234, False)]
     assert sess.state.pending == [] and sess.queued == 0
     assert sess.out.notices == [] and sess.out.texts == ["You've hit your session limit · resets 6pm (UTC)"]
     await asyncio.sleep(0.05)
@@ -284,7 +284,7 @@ async def test_limit_in_mid_turn_does_not_repeat_the_message_being_worked_on():
     await sess.send("two")
     await sess._client.interrupt()
     await until(lambda: sess.limits)
-    assert sess.limits == [(["two"], None)]
+    assert sess.limits == [(["two"], None, True)]
     await sess.close()
 
 
@@ -296,10 +296,35 @@ async def test_limit_during_compaction_compacts_again_later():
     await until(lambda: sess.limits)
     await until(lambda: not sess.busy)
     assert FakeClient.queries == ["/compact"]
-    assert sess.limits == [(["one"], None)]
+    assert sess.limits == [(["one"], None, False)]
     assert sess.state.context_tokens == 500 and sess.compact_next
     FakeClient.scripts = [[answer(), result()], [answer(), result()]]
     await sess.send("two")  # the limit has lifted
     await until(lambda: len(FakeClient.queries) == 3)
     assert FakeClient.queries[1:] == ["/compact", "two"]
+    await sess.close()
+
+
+async def test_limit_on_a_turn_claude_started_counts_as_cut_short():
+    sess = limited(make())
+    await sess.send("first")
+    await until(lambda: not sess.pending and sess.entries)
+    await sess._client._out.put(limit_hit())
+    await until(lambda: sess.busy)
+    await sess.send("two")
+    await sess._client._out.put(result(is_error=True))
+    await until(lambda: sess.limits)
+    assert sess.limits == [(["two"], None, True)]
+    await until(lambda: not sess.pending)
+    assert FakeClient.queries == ["first"]
+    await sess.close()
+
+
+async def test_limit_message_leaves_the_context_and_cache_figures_alone():
+    sess = limited(make())
+    sess.state.context_tokens, sess.state.last_api_at = 90_000, 123.0
+    FakeClient.scripts = [[limit_hit(), result(is_error=True)]]
+    await sess.send("one")
+    await until(lambda: sess.limits)
+    assert sess.state.context_tokens == 90_000 and sess.state.last_api_at == 123.0
     await sess.close()

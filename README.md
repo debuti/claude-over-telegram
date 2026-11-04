@@ -202,7 +202,9 @@ While a 5-hour or weekly plan limit stops Claude, messages wait instead of being
 turned down, also those that were queued when it hit, and the one it refused. Once
 the limit lifts the bot asks for your OK and sends them all together (or drops them);
 if the wait left the cache cold, the usual choice of where they go comes after it.
-They survive a restart too, and `/stop` drops them.
+If the limit cut Claude's work short, the same question offers to carry on with it
+(also with nothing waiting), first compacting if the cache went cold and you prefer.
+All this survives a restart too, and `/stop` drops it.
 
 | Command    | What it does                                         |
 |------------|------------------------------------------------------|

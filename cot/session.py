@@ -187,8 +187,9 @@ class Session:
         # The turn's cost, tokens and API calls, for the usage log.
         self.on_turn_end: Callable[[dict], Awaitable[None]] | None = None
         self.on_turn_failed: Callable[[], None] | None = None  # ended without a result
-        # A plan limit stopped Claude: the messages it didn't get to and when it resets (if known).
-        self.on_limited: Callable[[list[dict], float | None], Awaitable[None]] | None = None
+        # A plan limit stopped Claude: the messages it didn't get to, when it resets (if known)
+        # and whether it cut Claude's work short.
+        self.on_limited: Callable[[list[dict], float | None, bool], Awaitable[None]] | None = None
         self._client: ClaudeSDKClient | None = None
         self._task: asyncio.Task | None = None
         self.busy = False
@@ -496,9 +497,11 @@ class Session:
         await self._turn_done
         if self._limit_hit:
             # Claude did nothing with them if it got no further than the limit: they go again.
-            await self._limited([] if self._worked or self._keepalive or self._compacting else items)
+            # If it did, it's its work that has to go on.
+            own = not self._keepalive and not self._compacting
+            await self._limited(items if own and not self._worked else [], cut=own and self._worked)
 
-    async def _limited(self, turned_down: list[dict]) -> None:
+    async def _limited(self, turned_down: list[dict], cut: bool) -> None:
         """A plan limit stopped Claude: nothing queued can reach it, so the bot keeps it all."""
         self._limit_hit = False
         resets, self._limit_resets = self._limit_resets, None
@@ -512,7 +515,7 @@ class Session:
         while not self._queue.empty():
             self._queue.get_nowait()
         try:
-            await self.on_limited(items, resets)
+            await self.on_limited(items, resets, cut)
         except Exception:
             log.exception("could not report the plan limit")
 
@@ -575,7 +578,7 @@ class Session:
                         self._turn_done.set_result(None)
                     elif self._turn_done is None:
                         if self._limit_hit:
-                            await self._limited([])
+                            await self._limited([], cut=True)
                         self.busy = False
                         self._stopping = False
             raise ConnectionError("Claude stopped")
@@ -619,7 +622,7 @@ class Session:
                 self._limit_hit = True
             elif not nested:
                 self._worked = True
-            if not nested and msg.usage:
+            if not nested and msg.usage and not msg.error:  # an error's are all 0: no call was made
                 u = msg.usage
                 self.state.context_tokens = sum(u.get(k) or 0 for k in TOKEN_KINDS[:3])
                 # The main thread's cache lives on from its last call (subagents have their own).
