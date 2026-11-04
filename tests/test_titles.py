@@ -47,5 +47,6 @@ def test_plain_takes_the_status_out_of_an_edited_title(edited, name):
 
 
 def test_legend_explains_every_field():
-    for field in (titles.WORKING, titles.ASKING, titles.LIMITED, titles.ASLEEP, titles.COLD, titles.QUEUED, *titles.KEYCAPS[::10]):
+    states = (titles.WORKING, titles.ASKING, titles.LIMITED, titles.ASLEEP)
+    for field in (*states, titles.COLD, titles.QUEUED, *titles.KEYCAPS[::10]):
         assert field in titles.LEGEND
