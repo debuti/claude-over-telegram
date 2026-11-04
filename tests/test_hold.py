@@ -428,7 +428,7 @@ async def test_topic_name_with_everything_on(topic):
     state.last_api_at = bot_mod.time.time() - 600
     bot.sessions[TOPIC] = SimpleNamespace(state=state, waiting=False, pending=True, connected=True, queued=2)
     await bot._check_title(TOPIC, state)
-    assert bot.app.bot.renames == ["⚙️·7️⃣·45m·web·📨2"]
+    assert bot.app.bot.renames == ["⚙️·7️⃣·>45m·web·📨2"]
 
 
 async def test_topic_name_while_waiting_for_permission(topic):

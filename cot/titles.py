@@ -21,7 +21,7 @@ LEGEND = (
 )
 
 _STATUS_FIELD = re.compile(
-    "|".join(map(re.escape, (WORKING, ASKING, LIMITED, ASLEEP, COLD, *KEYCAPS))) + rf"|\d+m|{QUEUED}\d+"
+    "|".join(map(re.escape, (WORKING, ASKING, LIMITED, ASLEEP, COLD, *KEYCAPS))) + rf"|>?\d+m|{QUEUED}\d+"
 )
 
 
@@ -33,6 +33,8 @@ def room(context: int, compact_at: int) -> str:
 def cache(left: float) -> str:
     if left <= 0:
         return COLD
+    if left >= CACHE_STEPS[0] * 60:
+        return f">{CACHE_STEPS[0]}m"
     return f"{next((step for step in CACHE_STEPS if left >= step * 60), 1)}m"
 
 

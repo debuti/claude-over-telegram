@@ -15,7 +15,7 @@ def test_room(context, shown):
 
 @pytest.mark.parametrize(
     "left, shown",
-    [(3540, "45m"), (2700, "45m"), (2699, "30m"), (130, "2m"), (100, "1m"), (1, "1m"), (0, "🧊"), (-500, "🧊")],
+    [(3540, ">45m"), (2700, ">45m"), (2699, "30m"), (130, "2m"), (100, "1m"), (1, "1m"), (0, "🧊"), (-500, "🧊")],
 )
 def test_cache_never_overstates_whats_left(left, shown):
     assert titles.cache(left) == shown
@@ -37,6 +37,7 @@ def test_a_long_name_gives_way():
         ("⚙️·7️⃣·30m·web·📨2", "web"),
         ("💤·🔟·🧊·Mi web", "Mi web"),
         ("❓·7️⃣·web", "web"),
+        ("7️⃣·>45m·web", "web"),
         ("web", "web"),
         ("a·b", "a·b"),
         ("🧊", "🧊"),

@@ -209,8 +209,8 @@ All this survives a restart too, and `/stop` drops it.
 
 Each topic's name shows how it stands, e.g. `⚙️·7️⃣·30m·web·📨2`: ⚙️ working, ❓ waiting for
 your permission, ⏸ stopped by a plan limit or 💤 asleep (nothing while awake and idle); tenths of the room left
-until it compacts, `7️⃣` being 70%; time left of the prompt cache, in steps, or 🧊 once
-gone; its name; and messages waiting. It changes at most every 15 seconds, and the
+until it compacts, `7️⃣` being 70%; time left of the prompt cache, in steps from `>45m` down, or
+🧊 once gone; its name; and messages waiting. It changes at most every 15 seconds, and the
 bot deletes Telegram's rename notices (it needs to be an admin who can manage topics and
 delete messages). A topic from before the bot knew names shows this once you write in it:
 Telegram can't be asked for the name, and it's taken from the topic's creation, so one
