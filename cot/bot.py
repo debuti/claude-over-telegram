@@ -648,7 +648,9 @@ class Bot:
     def _title(self, key: Key, state: ConvState) -> str:
         """The topic's name as it should stand now."""
         sess = self.sessions.get(key)
-        if state.limit_until or state.limit_cut:
+        if sess and sess.waiting:  # first: it's the one that needs the user
+            status = titles.ASKING
+        elif state.limit_until or state.limit_cut:
             status = titles.LIMITED
         elif sess and sess.pending:
             status = titles.WORKING
