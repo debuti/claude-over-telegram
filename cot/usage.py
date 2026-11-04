@@ -74,6 +74,14 @@ def _until(iso: str | None) -> str:
     return f"resets in {_duration(secs)} ({_when(at)})" if secs > 0 else "resets now"
 
 
+def until(epoch: float) -> str:
+    return _until(datetime.fromtimestamp(epoch, timezone.utc).isoformat())
+
+
+def epoch(iso: str) -> float:
+    return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+
+
 def _pace(percent: float, iso: str | None) -> str:
     """How far usage is from an even spread across the week, and whether it lasts until the reset."""
     if not iso:

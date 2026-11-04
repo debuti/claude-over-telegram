@@ -61,6 +61,9 @@ COMMANDS = [
 # the summary (min(max output, 20k)) plus 13k; checked with get_context_usage on 0.2.168.
 COMPACT_BUFFER = 33_000
 
+# A plan limit that doesn't say when it resets: seconds until the bot looks again.
+LIMIT_RETRY = 5 * 60
+
 MODELS = {
     "claude-fable-5-1": "Fable 5.1",
     "claude-opus-5-5": "Opus 5.5",
@@ -86,6 +89,7 @@ class Bot:
         self._alarm_task: asyncio.Task | None = None
         # The plan usage the alarms last fetched: (time, data or None if unavailable).
         self._plan: tuple[float, dict | None] = (0.0, None)
+        self._plan_lock = asyncio.Lock()  # messages arriving during a fetch keep their order
         self.usage_log = usagelog.UsageLog(cfg.state_dir / "usage.jsonl", cfg.cli_path or container.bundled_cli())
         self.app = (
             Application.builder()
@@ -229,6 +233,7 @@ class Bot:
         sess.on_turn_start = lambda: self.usage_log.turn_started(key)
         sess.on_turn_end = lambda entry: self._log_turn(key, sess, entry)
         sess.on_turn_failed = lambda: self.usage_log.turn_failed(key)
+        sess.on_limited = lambda items, resets: self._on_limited(key, items, resets)
         sess.start()
         self.sessions[key] = sess
         if state.pending:
@@ -279,9 +284,12 @@ class Bot:
                 )
             return
         state = self._state(key)
-        if state.held:  # a warning is already waiting for an answer: this one waits with it
+        if state.held:  # a warning or a plan limit is already holding some: this one waits with them
             state.held.append({"text": text, "ids": ids or []})
             self.store.put(key, state)
+            return
+        if check and (state.limit_until or await self._blocked()):
+            await self._on_limited(key, [{"text": text, "ids": ids or []}], self._plan_resets())
             return
         if check and self._should_hold(key):
             state.held.append({"text": text, "ids": ids or []})
@@ -303,6 +311,36 @@ class Bot:
         if not state.session_id or (sess and (sess.connected or sess.pending)):
             return False
         return costguard.is_cold(time.time(), state.last_api_at or state.last_active, self.ttl)
+
+    async def _on_limited(self, key: Key, items: list[dict], resets: float | None) -> None:
+        """A plan limit stops Claude: messages wait, in order, until _check_limit sees it gone."""
+        state = self._state(key)
+        state.held = items + state.held
+        state.limit_until = max(state.limit_until, resets or 0.0) or time.time() + LIMIT_RETRY
+        self.store.put(key, state)
+        self._plan = (0.0, None)  # it didn't foresee this, or the next look is near the reset
+        if items:
+            n = len(state.held)
+            when = f", {usage.until(resets)}" if resets else ""
+            await self._output(key).notice(
+                f"⏸ Plan limit reached{when}. {n} message{'s' * (n > 1)} waiting; once it lifts "
+                "I'll ask for your OK to send them. /stop drops them."
+            )
+
+    async def _check_limit(self, key: Key, state: ConvState) -> None:
+        """Once the plan limit is gone, ask whether the messages that waited for it still go."""
+        sess = self.sessions.get(key)
+        state = sess.state if sess else state
+        if not state.limit_until or time.time() < state.limit_until or await self._blocked():
+            return
+        n = len(state.held)
+        previews = "\n".join(f"• <i>{esc(m['text'][:80])}</i>" for m in state.held[:5])
+        rows = [[("▶️ Send", "send"), ("🗑 Drop", "drop")]]
+        text = f"✅ The plan limit has lifted. Send {n} waiting message{'s' * (n > 1)} to Claude?\n\n{previews}"
+        if n and not await self._prompt(key, "limit", text, rows):
+            return  # looks again in a moment: sending them takes the user's OK
+        state.limit_until = 0.0
+        self.store.put(key, state)
 
     async def _wake(self, key: Key) -> None:
         """Held messages to a conversation whose cache went cold: decide where they go (WAKE=auto)
@@ -403,6 +441,14 @@ class Bot:
     async def _on_prompt(self, key: Key, kind: str, action: str) -> None:
         """A button of the live warning was tapped (its buttons are already gone)."""
         state = self._state(key)
+        if kind == "limit":
+            if action == "drop":
+                state.held = []
+                self.store.put(key, state)
+                return
+            if self._should_hold(key):  # the wait left the cache cold: where they go is still open
+                await self._wake(key)
+                return
         if kind == "wake":
             if action == "new":
                 await self._new(key)
@@ -419,6 +465,8 @@ class Bot:
         """Deliver the held messages where the conversation now stands, without asking again."""
         await self._drop_prompt(key)
         state = self._state(key)
+        if state.limit_until:  # nothing can reach Claude yet: _check_limit asks when it can
+            return
         held, state.held = state.held, []
         self.store.put(key, state)
         for item in held:
@@ -533,24 +581,31 @@ class Bot:
         # Messages that were waiting for Claude when the bot stopped.
         for key, state in self.store.items():
             if state.pending and self._assigned(key):
-                n = len(state.pending)
-                await self._output(key).notice(f"↩️ Passing on {n} message{'s' * (n > 1)} sent before the restart")
-                self._session(key)
+                if await self._blocked():
+                    pending, state.pending = state.pending, []
+                    await self._on_limited(key, pending, self._plan_resets())
+                else:
+                    n = len(state.pending)
+                    await self._output(key).notice(f"↩️ Passing on {n} message{'s' * (n > 1)} sent before the restart")
+                    self._session(key)
             if state.session_id and (not state.last_api_at or not state.context_tokens):
                 await self._backfill(key, state)
-            if state.held and self._assigned(key):
+            # Held for a plan limit, they go on waiting for it or for the answer to its prompt.
+            limit = state.limit_until or (state.prompt and state.prompt["kind"] == "limit")
+            if state.held and self._assigned(key) and not limit:
                 await self._ask_hold(key)
-        if self.cfg.cache_alarms or self.cfg.keepalive > self.ttl:
-            self._alarm_task = asyncio.create_task(self._alarm_loop())
+        self._alarm_task = asyncio.create_task(self._alarm_loop())
 
     async def _alarm_loop(self) -> None:
         while True:
             await asyncio.sleep(15)
             for key, state in self.store.items():
                 try:
-                    await self._check_alarm(key, state)
+                    await self._check_limit(key, state)
+                    if self.cfg.cache_alarms or self.cfg.keepalive > self.ttl:
+                        await self._check_alarm(key, state)
                 except Exception:
-                    log.exception("cache alarm or keep-alive failed")
+                    log.exception("plan limit check, cache alarm or keep-alive failed")
 
     async def _check_alarm(self, key: Key, state: ConvState) -> None:
         """Warn as the conversation's prompt cache nears its end (CACHE_ALARMS minutes before),
@@ -562,6 +617,8 @@ class Bot:
             await self._delete_alarm(key)
             alarm = None
         if not state.session_id or not state.last_api_at or (sess and sess.pending) or not self._assigned(key):
+            return
+        if state.limit_until:
             return
         now = time.time()
         left = costguard.cache_left(now, state.last_api_at, self.ttl)
@@ -609,15 +666,22 @@ class Bot:
         """Whether a plan limit stops Claude now (fetched at most once a minute; False if unknown)."""
         if self.cfg.api_key:
             return False
-        at, data = self._plan
-        if time.time() - at > 60:
-            try:
-                data = await usage.fetch(self.cfg.cli_path or container.bundled_cli())
-            except Exception as e:
-                log.debug("plan usage not available for the alarms: %s", e)
-                data = None
-            self._plan = (time.time(), data)
+        async with self._plan_lock:
+            at, data = self._plan
+            if time.time() - at > 60:
+                try:
+                    data = await usage.fetch(self.cfg.cli_path or container.bundled_cli())
+                except Exception as e:
+                    log.debug("plan usage not available: %s", e)
+                    data = None
+                self._plan = (time.time(), data)
         return bool(data) and usage.blocked(data) is not None
+
+    def _plan_resets(self) -> float | None:
+        """When the limit _blocked last saw resets; None if unknown."""
+        data = self._plan[1]
+        iso = usage.blocked(data) if data else None
+        return usage.epoch(iso) if iso else None
 
     async def _usage_text(self) -> str:
         try:
@@ -699,7 +763,7 @@ class Bot:
             await sess.close()
         # A new directory means a new conversation; display preferences carry over.
         state = ConvState(cwd=str(path), mode=old.mode, model=old.model, tools=old.tools, title=old.title)
-        state.held = old.held  # the new conversation gets them
+        state.held, state.limit_until = old.held, old.limit_until  # the new conversation gets them
         self.store.put(key, state)
         if old.prompt:
             try:
@@ -904,19 +968,22 @@ class Bot:
         key = self._key(update)
         sess = self.sessions.get(key)
         state = sess.state if sess else self._state(key)
-        if not sess or not sess.pending:
+        if state.limit_until:
+            activity = "stopped by a plan limit"
+        elif not sess or not sess.pending:
             activity = "idle"
         elif sess.waiting:
             activity = "waiting for your permission"
         else:
             activity = "working"
+        queued = (sess.queued if sess else 0) + len(state.held)
         lines = [
             f"📊 v{__version__}",
             f"working in: {self._where(key)}",
             f"conversation: {state.session_id or 'new'}",
             f"mode: {state.mode or self.cfg.permission_mode}",
             f"model: {(sess and sess.model) or state.model or 'default'}",
-            f"state: {activity}" + (f", {sess.queued} queued" if sess and sess.queued else ""),
+            f"state: {activity}" + (f", {queued} queued" if queued else ""),
             f"tools: {state.tools}",
         ]
         try:

@@ -198,6 +198,12 @@ shows "typing…", also when it picks up something on its own (a background job
 finishing). A 👀 reaction marks each message once Claude has it; messages still
 waiting when the bot restarts are passed on when it is back.
 
+While a 5-hour or weekly plan limit stops Claude, messages wait instead of being
+turned down, also those that were queued when it hit, and the one it refused. Once
+the limit lifts the bot asks for your OK and sends them all together (or drops them);
+if the wait left the cache cold, the usual choice of where they go comes after it.
+They survive a restart too, and `/stop` drops them.
+
 | Command    | What it does                                         |
 |------------|------------------------------------------------------|
 | `/help`    | List commands                                        |

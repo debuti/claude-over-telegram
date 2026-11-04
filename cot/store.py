@@ -30,6 +30,8 @@ class ConvState:
     pending: list[dict] = field(default_factory=list)
     # Messages held back by a warning ({"text", "ids"}) until the user picks what happens to them.
     held: list[dict] = field(default_factory=list)
+    # While a plan limit stops Claude: epoch seconds of when to look again. Held messages wait for it.
+    limit_until: float = 0.0
     # The warning whose buttons are live: {"nonce", "msg_id", "kind"}; at most one per conversation.
     prompt: dict | None = None
 

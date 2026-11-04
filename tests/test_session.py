@@ -7,7 +7,7 @@ from cot import session as session_mod
 from cot.session import Session
 from cot.store import ConvState
 
-from .fakes import INTERRUPT, FakeClient, FakeOutput, answer, result
+from .fakes import INTERRUPT, FakeClient, FakeOutput, answer, limit_event, limit_hit, result
 
 
 @pytest.fixture(autouse=True)
@@ -188,4 +188,118 @@ async def test_message_with_a_keepalive_replaces_it():
     await sess.send("hi")
     await until(lambda: sess.entries)
     assert FakeClient.queries == ["hi"] and sess.entries[0]["by"] == "user" and sess.out.texts == ["hello"]
+    await sess.close()
+
+
+def limited(sess):
+    """Collect what the session hands back when a plan limit stops Claude."""
+    sess.limits = []
+
+    async def on_limited(items, resets):
+        sess.limits.append(([item["text"] for item in items], resets))
+
+    sess.on_limited = on_limited
+    return sess
+
+
+async def test_messages_during_a_turn_go_together_and_stay_saved_until_then():
+    sess = make()
+    FakeClient.scripts = [[answer(), INTERRUPT, result()]]
+    await sess.send("one")
+    await until(lambda: FakeClient.queries == ["one"])
+    await sess.send("two")
+    await sess.send("three")
+    await asyncio.sleep(0.05)
+    assert FakeClient.queries == ["one"]
+    assert [p["text"] for p in sess.state.pending] == ["two", "three"]  # what a restart passes on
+    await sess._client.interrupt()
+    await until(lambda: len(FakeClient.queries) == 2)
+    assert FakeClient.queries[1] == "two\n\nthree"
+    await until(lambda: not sess.state.pending)
+    await sess.close()
+
+
+async def test_queued_messages_are_passed_on_after_a_restart():
+    state = ConvState(cwd="/tmp", session_id="sess-1", pending=[{"text": "one", "ids": []}, {"text": "two", "ids": []}])
+    sess = make(state)
+    await until(lambda: FakeClient.queries == ["one\n\ntwo"])
+    await until(lambda: not sess.state.pending)
+    await sess.close()
+
+
+async def test_a_turn_claude_started_makes_messages_wait_for_its_end():
+    sess = make()
+    await sess.send("first")
+    await until(lambda: sess.entries)
+    await until(lambda: not sess.pending)
+    client = sess._client
+    await client._out.put(answer(text="a job finished"))
+    await until(lambda: sess.busy)
+    await sess.send("two")
+    await sess.send("three")
+    await asyncio.sleep(0.05)
+    assert FakeClient.queries == ["first"]
+    await client._out.put(result())
+    await until(lambda: len(FakeClient.queries) == 2)
+    assert FakeClient.queries[1] == "two\n\nthree"
+    await sess.close()
+
+
+async def test_stop_during_a_turn_claude_started_does_not_lose_the_next_message():
+    sess = make()
+    await sess.send("first")
+    await until(lambda: not sess.pending and sess.entries)
+    client = sess._client
+    await client._out.put(answer())
+    await until(lambda: sess.busy)
+    await sess.stop()
+    await client._out.put(result())
+    await until(lambda: not sess.busy)
+    await sess.send("next")
+    await until(lambda: FakeClient.queries == ["first", "next"])
+    await sess.close()
+
+
+async def test_limit_hands_back_the_message_it_turned_down_and_the_queue():
+    sess = limited(make())
+    FakeClient.scripts = [[limit_event(1234), INTERRUPT, limit_hit(), result(is_error=True)]]
+    await sess.send("one")
+    await until(lambda: FakeClient.queries == ["one"])
+    await sess.send("two")
+    await sess._client.interrupt()
+    await until(lambda: sess.limits)
+    assert sess.limits == [(["one", "two"], 1234)]
+    assert sess.state.pending == [] and sess.queued == 0
+    assert sess.out.notices == [] and sess.out.texts == ["You've hit your session limit · resets 6pm (UTC)"]
+    await asyncio.sleep(0.05)
+    assert FakeClient.queries == ["one"]  # nothing goes on trying
+    await sess.close()
+
+
+async def test_limit_in_mid_turn_does_not_repeat_the_message_being_worked_on():
+    sess = limited(make())
+    FakeClient.scripts = [[answer(), INTERRUPT, limit_hit(), result(is_error=True)]]
+    await sess.send("one")
+    await until(lambda: FakeClient.queries == ["one"])
+    await sess.send("two")
+    await sess._client.interrupt()
+    await until(lambda: sess.limits)
+    assert sess.limits == [(["two"], None)]
+    await sess.close()
+
+
+async def test_limit_during_compaction_compacts_again_later():
+    sess = limited(make(compact_at=100))
+    sess.state.context_tokens = 500
+    FakeClient.scripts = [[limit_hit(), result(is_error=True)]]
+    await sess.send("one")
+    await until(lambda: sess.limits)
+    await until(lambda: not sess.busy)
+    assert FakeClient.queries == ["/compact"]
+    assert sess.limits == [(["one"], None)]
+    assert sess.state.context_tokens == 500 and sess.compact_next
+    FakeClient.scripts = [[answer(), result()], [answer(), result()]]
+    await sess.send("two")  # the limit has lifted
+    await until(lambda: len(FakeClient.queries) == 3)
+    assert FakeClient.queries[1:] == ["/compact", "two"]
     await sess.close()

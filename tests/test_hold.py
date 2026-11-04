@@ -66,6 +66,12 @@ def bot(tmp_path, monkeypatch):
     b.delivered = []
     b.sess = SimpleNamespace(compact_next=False, stop=None)
     b.hold = True
+    b.limit, b._plan = False, (0.0, None)
+
+    async def blocked(self):
+        return self.limit
+
+    monkeypatch.setattr(Bot, "_blocked", blocked)
     monkeypatch.setattr(Bot, "_output", lambda self, key: self.out)
     monkeypatch.setattr(Bot, "_should_hold", lambda self, key: self.hold)
 
@@ -211,3 +217,95 @@ async def test_auto_without_verdict_asks(auto):
 )
 def test_parse(answer, parsed):
     assert triage.parse(answer) == parsed
+
+
+@pytest.fixture
+def limit(bot):
+    """A plan limit is stopping Claude; what would ask about the cache stays out of the way."""
+    bot.limit, bot.hold = True, False
+    return bot
+
+
+async def test_limit_holds_messages_and_says_so_once(limit, tmp_path):
+    await limit._submit(KEY, "one", [1])
+    await limit._submit(KEY, "two", [2])
+    assert limit.delivered == []
+    assert len(limit.out.notices) == 1 and "Plan limit reached" in limit.out.notices[0]
+    saved = Store(tmp_path / "sessions.json").get(KEY)  # what a restart finds
+    assert [m["text"] for m in saved.held] == ["one", "two"] and saved.limit_until > 0
+
+
+async def test_limit_lifted_asks_then_sends_them_all(limit):
+    await limit._submit(KEY, "one")
+    await limit._submit(KEY, "two")
+    state = limit.store.get(KEY)
+    await limit._check_limit(KEY, state)
+    assert limit.out.sent == []  # still before the time it should end
+    state.limit_until = 1.0
+    await limit._check_limit(KEY, state)
+    assert limit.out.sent == []  # past it, but the plan still says it's stopped
+    limit.limit = False
+    await limit._check_limit(KEY, state)
+    assert limit.delivered == [] and "Send 2 waiting messages" in limit.out.sent[0][0]
+    assert state.limit_until == 0 and state.prompt["kind"] == "limit"
+    await limit._submit(KEY, "three")  # waits for the same answer
+    await limit._check_limit(KEY, state)
+    assert len(limit.out.sent) == 1
+    query, rest = tap(limit, "send")
+    await limit._on_guard(KEY, query, rest)
+    assert limit.delivered == ["one", "two", "three"] and state.held == []
+
+
+async def test_limit_lifted_drop(limit):
+    await limit._submit(KEY, "one")
+    state = limit.store.get(KEY)
+    state.limit_until, limit.limit = 1.0, False
+    await limit._check_limit(KEY, state)
+    query, rest = tap(limit, "drop")
+    await limit._on_guard(KEY, query, rest)
+    assert limit.delivered == [] and state.held == []
+
+
+async def test_limit_lifted_with_a_cold_cache_goes_on_to_the_wake_choice(limit):
+    await limit._submit(KEY, "one")
+    state = limit.store.get(KEY)
+    state.limit_until, limit.limit = 1.0, False
+    await limit._check_limit(KEY, state)
+    limit.hold = True
+    query, rest = tap(limit, "send")
+    await limit._on_guard(KEY, query, rest)
+    assert limit.delivered == [] and state.prompt["kind"] == "wake" and len(state.held) == 1
+
+
+async def test_prompt_not_sent_when_limit_lifts_tries_again(limit):
+    await limit._submit(KEY, "one")
+    state = limit.store.get(KEY)
+    state.limit_until, limit.limit, limit.out.fail = 1.0, False, True
+    await limit._check_limit(KEY, state)
+    assert limit.delivered == [] and state.limit_until == 1.0
+    limit.out.fail = False
+    await limit._check_limit(KEY, state)
+    assert state.prompt["kind"] == "limit"
+
+
+async def test_new_conversation_during_a_limit_keeps_them_waiting(limit):
+    await limit._submit(KEY, "one")
+    await limit._release(KEY)
+    assert limit.delivered == [] and len(limit.store.get(KEY).held) == 1
+
+
+async def test_turned_down_messages_go_before_those_already_held(bot):
+    state = bot.store.get(KEY)
+    state.held = [{"text": "later", "ids": []}]
+    await bot._on_limited(KEY, [{"text": "first", "ids": []}], 2_000_000_000.0)
+    assert [m["text"] for m in state.held] == ["first", "later"] and state.limit_until == 2_000_000_000.0
+    assert "resets in" in bot.out.notices[0]
+
+
+async def test_limit_with_nothing_waiting_ends_silently(bot):
+    await bot._on_limited(KEY, [], None)
+    state = bot.store.get(KEY)
+    assert bot.out.notices == [] and state.limit_until > 0
+    state.limit_until = 1.0
+    await bot._check_limit(KEY, state)
+    assert state.limit_until == 0 and bot.out.sent == []

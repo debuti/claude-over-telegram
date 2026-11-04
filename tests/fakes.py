@@ -2,7 +2,7 @@
 
 import asyncio
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import AssistantMessage, RateLimitEvent, RateLimitInfo, ResultMessage, TextBlock
 
 INTERRUPT = object()  # in a script: wait here until the turn is interrupted
 
@@ -11,6 +11,16 @@ def answer(read=0, write=0, inp=5, text="ok", parent=None):
     usage = {"input_tokens": inp, "cache_creation_input_tokens": write, "cache_read_input_tokens": read,
              "output_tokens": 10}
     return AssistantMessage([TextBlock(text)], "claude-test", parent_tool_use_id=parent, usage=usage)
+
+
+def limit_event(resets_at):
+    return RateLimitEvent(RateLimitInfo("rejected", resets_at), "uuid", "sess-1")
+
+
+def limit_hit():
+    """What the CLI answers when a plan limit turns a call down."""
+    return AssistantMessage([TextBlock("You've hit your session limit · resets 6pm (UTC)")], "<synthetic>",
+                            error="rate_limit")
 
 
 def result(is_error=False, terminal_reason=None, cost=0.01):

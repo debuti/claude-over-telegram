@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    RateLimitEvent,
     ResultMessage,
     SystemMessage,
     TaskNotificationMessage,
@@ -186,6 +187,8 @@ class Session:
         # The turn's cost, tokens and API calls, for the usage log.
         self.on_turn_end: Callable[[dict], Awaitable[None]] | None = None
         self.on_turn_failed: Callable[[], None] | None = None  # ended without a result
+        # A plan limit stopped Claude: the messages it didn't get to and when it resets (if known).
+        self.on_limited: Callable[[list[dict], float | None], Awaitable[None]] | None = None
         self._client: ClaudeSDKClient | None = None
         self._task: asyncio.Task | None = None
         self.busy = False
@@ -201,6 +204,10 @@ class Session:
         self._logging: set[asyncio.Task] = set()
         self._fresh = False  # no turn yet in this Claude process
         self._probe: dict | None = None  # the running turn's cache measurements, for the usage log
+        self._limit_hit = False  # the running turn was turned down by a plan limit
+        self._limit_resets: float | None = None  # when, as far as Claude said
+        self._handed_back = False  # a limit during this turn's compaction took its messages too
+        self._worked = False  # the running turn got some answer from Claude
 
     def _set_waiting(self, value: bool) -> None:
         self.waiting = value
@@ -393,6 +400,7 @@ class Session:
             if not items:  # dropped by /stop while gathering
                 continue
             self.busy = True
+            self._handed_back = False
             try:
                 if self._client is not None and not self._alive():
                     log.warning("Claude exited between turns; reconnecting")
@@ -401,7 +409,8 @@ class Session:
                     await self._connect()
                 if self._needs_compact() and not self._stopping:
                     await self._compact("first")
-                if self._stopping:  # /stop while connecting or compacting: the messages go too
+                # /stop while connecting or compacting: the messages go too.
+                if self._stopping or self._handed_back:
                     continue
                 await self._turn(items)
             except asyncio.CancelledError:
@@ -460,6 +469,8 @@ class Session:
             try:
                 item = await asyncio.wait_for(self._queue.get(), GATHER_SECONDS)
             except asyncio.TimeoutError:
+                if self.busy:  # Claude working on a turn of its own: they all go when it ends
+                    continue
                 break
             self._gathered.append(item)  # after a /stop this starts afresh
         items, self._gathered = self._gathered, []
@@ -472,6 +483,7 @@ class Session:
         self._keepalive = not real
         items = real or items[:1]
         self._turn_done = asyncio.get_running_loop().create_future()
+        self._limit_hit = self._worked = False
         if not self._keepalive:  # keep-alives don't count as use: they stop some hours after it
             self.state.last_active = time.time()
         self._begin_turn()
@@ -482,6 +494,27 @@ class Session:
         if self.on_delivered:
             await self.on_delivered([i for item in items for i in item["ids"]])
         await self._turn_done
+        if self._limit_hit:
+            # Claude did nothing with them if it got no further than the limit: they go again.
+            await self._limited([] if self._worked or self._keepalive or self._compacting else items)
+
+    async def _limited(self, turned_down: list[dict]) -> None:
+        """A plan limit stopped Claude: nothing queued can reach it, so the bot keeps it all."""
+        self._limit_hit = False
+        resets, self._limit_resets = self._limit_resets, None
+        if self._compacting:  # still wanted once Claude can run again
+            self.compact_next = True
+        if not self.on_limited:
+            return
+        items, self.state.pending = turned_down + self.state.pending, []
+        self._handed_back = True
+        self._gathered.clear()
+        while not self._queue.empty():
+            self._queue.get_nowait()
+        try:
+            await self.on_limited(items, resets)
+        except Exception:
+            log.exception("could not report the plan limit")
 
     def _begin_turn(self) -> None:
         """Note how the cache should stand, to check against what the turn's first call reports."""
@@ -529,7 +562,8 @@ class Session:
                     self.state.last_active = time.time()  # saved with the turn's result
                 if self._track_task(msg):  # bookkeeping, not a turn
                     continue
-                if not self.busy:  # a turn Claude started on its own
+                # Claude's system messages also come between turns, which they don't start.
+                if not self.busy and not isinstance(msg, SystemMessage):  # a turn Claude started on its own
                     self.busy = True
                     self._begin_turn()
                     if self.on_active:
@@ -540,7 +574,10 @@ class Session:
                     if self._turn_done and not self._turn_done.done():
                         self._turn_done.set_result(None)
                     elif self._turn_done is None:
+                        if self._limit_hit:
+                            await self._limited([])
                         self.busy = False
+                        self._stopping = False
             raise ConnectionError("Claude stopped")
         except asyncio.CancelledError:
             raise
@@ -552,7 +589,10 @@ class Session:
                 self.busy = False
 
     def _track_task(self, msg) -> bool:
-        if isinstance(msg, TaskStartedMessage):
+        if isinstance(msg, RateLimitEvent):
+            info = msg.rate_limit_info
+            self._limit_resets = info.resets_at if info.status == "rejected" else None
+        elif isinstance(msg, TaskStartedMessage):
             self._tasks.add(msg.task_id)
         elif isinstance(msg, (TaskNotificationMessage, TaskUpdatedMessage)):
             if msg.status in TERMINAL_TASK_STATUSES:
@@ -575,6 +615,10 @@ class Session:
     async def _handle(self, msg) -> None:
         if isinstance(msg, AssistantMessage):
             nested = msg.parent_tool_use_id is not None
+            if not nested and msg.error == "rate_limit":
+                self._limit_hit = True
+            elif not nested:
+                self._worked = True
             if not nested and msg.usage:
                 u = msg.usage
                 self.state.context_tokens = sum(u.get(k) or 0 for k in TOKEN_KINDS[:3])
@@ -630,9 +674,9 @@ class Session:
                 self._logging.add(task)
                 task.add_done_callback(self._logging.discard)
             stopped = self._stopping or (msg.terminal_reason or "").startswith("aborted")
-            self._turn_ok = not stopped and not msg.is_error
+            self._turn_ok = not stopped and not msg.is_error and not self._limit_hit
             if stopped:
                 await self.out.notice("🛑 Stopped")
-            elif msg.is_error:
+            elif msg.is_error and not self._limit_hit:  # Claude has said which limit, and until when
                 detail = "; ".join(msg.errors or []) or msg.subtype
                 await self.out.notice(f"⚠️ Claude ended with an error: {detail}")
