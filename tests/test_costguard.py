@@ -172,3 +172,23 @@ def test_usage_blocked(limits, extra, out):
     from cot import usage
 
     assert usage.blocked({"limits": limits, "extra_usage": extra}) == out
+
+
+@pytest.mark.parametrize(
+    "window, since_use, left, lasts",
+    [
+        (3600, 60, 3480, 3480),  # no longer than the cache: nothing keeps it
+        (7200, 0, 3540, 3180 + 3540),  # one keep-alive left for it, then a whole cache
+        (7200, 3300, 300, 1 + 3540),  # within the lead: it goes now
+        (7200, 4000, 300, 300),  # past the last keep-alive
+        (0, 0, 3540, 3540),
+        (7200, 0, 0, 0),  # gone
+    ],
+)
+def test_warm_left(window, since_use, left, lasts):
+    now = 10_000
+    assert costguard.warm_left(now, left, now - since_use, 3600, window) == lasts
+
+
+def test_warm_left_ends_with_a_cache_barely_longer_than_its_margin():
+    assert costguard.warm_left(0, 10, 0, 70, 7200) > 0

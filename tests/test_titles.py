@@ -15,7 +15,18 @@ def test_room(context, shown):
 
 @pytest.mark.parametrize(
     "left, shown",
-    [(3540, ">45m"), (2700, ">45m"), (2699, "30m"), (130, "2m"), (100, "1m"), (1, "1m"), (0, "🧊"), (-500, "🧊")],
+    [
+        (6720, ">90m"),
+        (5399, ">60m"),
+        (3540, ">45m"),
+        (2700, ">45m"),
+        (2699, "30m"),
+        (130, "2m"),
+        (100, "1m"),
+        (1, "1m"),
+        (0, "🧊"),
+        (-500, "🧊"),
+    ],
 )
 def test_cache_never_overstates_whats_left(left, shown):
     assert titles.cache(left) == shown

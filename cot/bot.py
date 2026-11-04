@@ -659,10 +659,25 @@ class Bot:
         room = ""
         if self.cfg.compact_at:  # the same size Session._needs_compact goes by
             room = titles.room(state.context_tokens, max(self.cfg.compact_at, 2 * state.after_compact))
-        left = costguard.cache_left(time.time(), state.last_api_at, self.ttl)
-        cache = titles.cache(left) if state.last_api_at else ""
+        cache = titles.cache(self._cache_lasts(state)) if state.last_api_at else ""
         queued = (sess.queued if sess else len(state.pending)) + len(state.held)
         return titles.compose(state.title, status, room, cache, queued)
+
+    def _cache_lasts(self, state: ConvState) -> float:
+        """Seconds until this conversation's cache is really lost, with the keep-alives _check_alarm
+        would send it. A plan limit stops those; _blocked's last look is enough, it looks again as one falls due."""
+        now = time.time()
+        left = costguard.cache_left(now, state.last_api_at, self.ttl)
+        data = self._plan[1]
+        if (
+            not state.session_id
+            or state.limit_until
+            or state.limit_cut
+            or state.context_tokens < self.cfg.wake_small
+            or (data and usage.blocked(data) is not None)
+        ):
+            return left
+        return costguard.warm_left(now, left, state.last_active, self.ttl, self.cfg.keepalive)
 
     async def _check_title(self, key: Key, state: ConvState) -> None:
         """Keep the topic's name showing its status. Only with its real name known (Telegram has no

@@ -78,6 +78,15 @@ def keepalive_due(now: float, left: float, last_used: float, ttl: int, window: f
     return left <= keepalive_lead(ttl) and keeps_alive(now, left, last_used, ttl, window)
 
 
+def warm_left(now: float, left: float, last_used: float, ttl: int, window: float) -> float:
+    """Seconds until the cache is really lost: left, plus what the keep-alives still to come add."""
+    at = now
+    while keeps_alive(at, left, last_used, ttl, window):
+        at += max(left - keepalive_lead(ttl), 1)
+        left = cache_left(at, at, ttl)
+    return at + left - now
+
+
 def alarm_step(left: float, ttl: int, steps: tuple[int, ...], last: int | None) -> int | None:
     """The cache alarm (minutes left) due now, or None.
 

@@ -408,6 +408,7 @@ TOPIC = (1, 5)
 @pytest.fixture
 def topic(bot):
     bot.cfg.compact_at = 150_000
+    bot.cfg.keepalive, bot.cfg.wake_small = 3600, 30_000
     bot._titles_pause = 0.0
     (bot.cfg.workdir / "web").mkdir()
     state = ConvState(cwd=str(bot.cfg.workdir / "web"), session_id="s1", title="web", context_tokens=45_000)
@@ -429,6 +430,24 @@ async def test_topic_name_with_everything_on(topic):
     bot.sessions[TOPIC] = SimpleNamespace(state=state, waiting=False, pending=True, connected=True, queued=2)
     await bot._check_title(TOPIC, state)
     assert bot.app.bot.renames == ["⚙️·7️⃣·>45m·web·📨2"]
+
+
+@pytest.mark.parametrize(
+    "tokens, plan, shown",
+    [
+        (45_000, None, "💤·7️⃣·>90m·web"),  # 53 min to the keep-alive, and a whole cache after it
+        (29_000, None, "💤·8️⃣·>45m·web"),  # too small for keep-alives
+        (45_000, {"limits": [{"kind": "session", "percent": 100}]}, "💤·7️⃣·>45m·web"),  # the plan stops them
+    ],
+)
+async def test_topic_name_counts_the_keep_alives_this_conversation_gets(topic, tokens, plan, shown):
+    bot, state = topic
+    bot.cfg.keepalive = 7200
+    bot._plan = (0.0, plan)
+    state.last_api_at = state.last_active = bot_mod.time.time()
+    state.context_tokens = tokens
+    await bot._check_title(TOPIC, state)
+    assert bot.app.bot.renames == [shown]
 
 
 async def test_topic_name_while_waiting_for_permission(topic):
