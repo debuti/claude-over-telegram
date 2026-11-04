@@ -107,6 +107,7 @@ All settings live in `.env` next to the code (see `.env.example`):
 | `WAKE`             | `auto` | Where a message to a conversation whose cache went cold goes: `auto` lets Haiku decide (compact and continue, or a new conversation) and explains why; `ask` asks with buttons |
 | `WAKE_SMALL_TOKENS` | `30000` | Below this context size such a message just continues the conversation, without deciding anything |
 | `KEEPALIVE_HOURS`  | `1` | Keep a conversation's prompt cache warm until this many hours after its last use, with a tiny hidden turn a few minutes before it expires (each costs a tenth of re-sending the context cold). Only for contexts past `WAKE_SMALL_TOKENS`; the cache alarms wait until the keep-alives stop. `1`, the cache's own life, keeps nothing; `3` covers coming back within a few hours |
+| `TOPIC_TITLES`     | `true`     | Keep each topic's name showing its status (see [Using it](#using-it)) |
 | `EUR_PER_USD`      | `0.87` | Exchange rate for the costs shown in euros (the CLI reports dollars; on a subscription they are what the API would have charged) |
 | `CACHE_ALARMS`     | `30,15,10,5,2,1` | Minutes before a conversation's prompt cache expires at which the bot warns in it (with what the next message will cost once it's gone); `off` turns them off. Each alarm deletes the one before and is sent anew, so each one notifies; the last goes once the conversation is used again. When the cache does expire, a message says so, with the plan usage. None are sent (nor keep-alives) while a 5-hour or weekly limit stops Claude |
 | `SANDBOX_DOCKER`   | `true`     | Run each conversation's Claude in its own container (see [Confinement](#confinement)) |
@@ -205,6 +206,16 @@ if the wait left the cache cold, the usual choice of where they go comes after i
 If the limit cut Claude's work short, the same question offers to carry on with it
 (also with nothing waiting), first compacting if the cache went cold and you prefer.
 All this survives a restart too, and `/stop` drops it.
+
+Each topic's name shows how it stands, e.g. `⚙️·7️⃣·30m·web·📨2`: ⚙️ working, ⏸ stopped
+by a plan limit or 💤 asleep (nothing while awake and idle); tenths of the room left
+until it compacts, `7️⃣` being 70%; time left of the prompt cache, in steps, or 🧊 once
+gone; its name; and messages waiting. It changes at most every 15 seconds, and the
+bot deletes Telegram's rename notices (it needs to be an admin who can manage topics and
+delete messages). A topic from before the bot knew names shows this once you write in it:
+Telegram can't be asked for the name, and it's taken from the topic's creation, so one
+renamed since then needs renaming once more to keep its current name. `TOPIC_TITLES=false`
+turns it off.
 
 | Command    | What it does                                         |
 |------------|------------------------------------------------------|

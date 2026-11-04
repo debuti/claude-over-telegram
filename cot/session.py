@@ -209,11 +209,13 @@ class Session:
         self._limit_resets: float | None = None  # when, as far as Claude said
         self._handed_back = False  # a limit during this turn's compaction took its messages too
         self._worked = False  # the running turn got some answer from Claude
+        self._running_as: str | None = None  # the container's name, if the topic is renamed after it starts
 
     def _set_waiting(self, value: bool) -> None:
         self.waiting = value
 
     def _options(self) -> ClaudeAgentOptions:
+        self._running_as = self._container_name()
         return ClaudeAgentOptions(
             cwd=self.state.cwd,
             resume=self.state.session_id,
@@ -227,7 +229,7 @@ class Session:
             system_prompt={"type": "preset", "preset": "claude_code", "append": APPEND_PROMPT},
             settings=json.dumps(CLI_SETTINGS),
             cli_path=self._cli_path,
-            env={**self._cli_env, "COT_NAME": self._container_name()},
+            env={**self._cli_env, "COT_NAME": self._running_as},
             can_use_tool=permissions.make_can_use_tool(self.out, Path(self.state.cwd), self._set_waiting),
             hooks={"PreToolUse": [make_hook(Path(self.state.cwd))]},
             # Bash writes confined to cwd; needs working unprivileged bubblewrap on Linux.
@@ -348,7 +350,7 @@ class Session:
                 pass
         await self._disconnect()
         if self._in_docker:
-            await asyncio.to_thread(container.stop_claude, self._container_name())
+            await asyncio.to_thread(container.stop_claude, self._running_as or self._container_name())
 
     @property
     def _in_docker(self) -> bool:
@@ -395,7 +397,7 @@ class Session:
                         self._stopping = False
                 await self._disconnect()
                 if self._in_docker:
-                    await asyncio.to_thread(container.reap, self._container_name())
+                    await asyncio.to_thread(container.reap, self._running_as or self._container_name())
                 continue
             items = await self._gather(item)
             if not items:  # dropped by /stop while gathering

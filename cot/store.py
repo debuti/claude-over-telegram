@@ -26,6 +26,7 @@ class ConvState:
     # 0 in state from before 2.13 (then the transcript's last write stands in).
     last_api_at: float = 0.0
     title: str | None = None  # topic name, known when the topic is created or renamed
+    shown_title: str | None = None  # what the bot last set the topic's name to, status included
     # Messages not yet handed to Claude ({"text", "ids"}), so a restart doesn't lose them.
     pending: list[dict] = field(default_factory=list)
     # Messages held back by a warning ({"text", "ids"}) until the user picks what happens to them.

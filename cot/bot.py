@@ -8,7 +8,7 @@ from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
-from telegram.error import TelegramError
+from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -18,7 +18,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, container, costguard, history, permissions, server, triage, uploads, usage, usagelog
+from . import __version__, container, costguard, history, permissions, server, titles, triage, uploads, usage, usagelog
 from .config import Config
 from .output import TelegramOutput
 from .render import esc
@@ -96,6 +96,7 @@ class Bot:
         # The plan usage the alarms last fetched: (time, data or None if unavailable).
         self._plan: tuple[float, dict | None] = (0.0, None)
         self._plan_lock = asyncio.Lock()  # messages arriving during a fetch keep their order
+        self._titles_pause = 0.0  # no renames before this: Telegram asked to slow down
         self.usage_log = usagelog.UsageLog(cfg.state_dir / "usage.jsonl", cfg.cli_path or container.bundled_cli())
         self.app = (
             Application.builder()
@@ -575,11 +576,13 @@ class Bot:
 
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
+        self._learn_title(self._key(update), msg)
         await self._submit(self._key(update), msg.text, [msg.message_id])
 
     async def _on_file(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
         msg = update.effective_message
+        self._learn_title(key, msg)
         if not await self._ready(key):
             await self._output(key).notice("Send the file again once the folder is picked.")
             return
@@ -635,10 +638,49 @@ class Bot:
             for key, state in self.store.items():
                 try:
                     await self._check_limit(key, state)
+                    if self.cfg.topic_titles:
+                        await self._check_title(key, state)
                     if self.cfg.cache_alarms or self.cfg.keepalive > self.ttl:
                         await self._check_alarm(key, state)
                 except Exception:
                     log.exception("plan limit check, cache alarm or keep-alive failed")
+
+    def _title(self, key: Key, state: ConvState) -> str:
+        """The topic's name as it should stand now."""
+        sess = self.sessions.get(key)
+        if state.limit_until or state.limit_cut:
+            status = titles.LIMITED
+        elif sess and sess.pending:
+            status = titles.WORKING
+        else:
+            status = "" if sess and sess.connected else titles.ASLEEP
+        room = ""
+        if self.cfg.compact_at:  # the same size Session._needs_compact goes by
+            room = titles.room(state.context_tokens, max(self.cfg.compact_at, 2 * state.after_compact))
+        left = costguard.cache_left(time.time(), state.last_api_at, self.ttl)
+        cache = titles.cache(left) if state.last_api_at else ""
+        queued = (sess.queued if sess else len(state.pending)) + len(state.held)
+        return titles.compose(state.title, status, room, cache, queued)
+
+    async def _check_title(self, key: Key, state: ConvState) -> None:
+        """Keep the topic's name showing its status. Only with its real name known (Telegram has no
+        way to ask for it): a guessed one would overwrite what the user called it."""
+        sess = self.sessions.get(key)
+        state = sess.state if sess else state
+        if not key[1] or not state.title or not self._assigned(key) or time.time() < self._titles_pause:
+            return
+        title = self._title(key, state)
+        if title == state.shown_title:
+            return
+        try:
+            await self.app.bot.edit_forum_topic(key[0], key[1], name=title)
+        except RetryAfter as e:
+            self._titles_pause = time.time() + float(e.retry_after)
+            return
+        except BadRequest as e:  # not modified, topic deleted, no permission: not worth insisting
+            log.debug("could not rename topic %s: %s", key, e)
+        state.shown_title = title
+        self.store.put(key, state)
 
     async def _check_alarm(self, key: Key, state: ConvState) -> None:
         """Warn as the conversation's prompt cache nears its end (CACHE_ALARMS minutes before),
@@ -825,13 +867,20 @@ class Bot:
     async def _on_topic_edited(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         name = update.effective_message.forum_topic_edited.name
         if name:  # None when only the icon changed
-            self._set_title(self._key(update), name.strip())
+            self._set_title(self._key(update), titles.plain(name.strip()))
 
     def _set_title(self, key: Key, title: str) -> None:
-        """Remembered to name the conversation's container (from its next start)."""
+        """Remembered to name the conversation's container (from its next start) and its topic."""
         state = self._state(key)
         state.title = title
+        state.shown_title = None
         self.store.put(key, state)
+
+    def _learn_title(self, key: Key, msg) -> None:
+        """Topics older than the bot's knowing their names: messages in one point at its creation."""
+        created = msg.reply_to_message and msg.reply_to_message.forum_topic_created
+        if created and key[1] and not self._state(key).title:
+            self._set_title(key, created.name)
 
     async def _cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
@@ -1105,7 +1154,14 @@ class Bot:
             await query.answer()
 
     async def _on_stranger(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        user = update.effective_user
+        user, msg = update.effective_user, update.effective_message
+        if user and user.id == self.app.bot.id and msg and msg.forum_topic_edited:
+            # The service message for a rename of ours: the topic's name already says it all.
+            try:
+                await msg.delete()
+            except TelegramError as e:
+                log.debug("could not delete the rename notice: %s", e)
+            return
         # Logged so the owner can find their own id; nothing is sent back.
         log.warning("ignored update from user id=%s username=%s", user and user.id, user and user.username)
 

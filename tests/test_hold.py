@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest, RetryAfter
 
 from cot import bot as bot_mod
 from cot import triage
@@ -15,10 +16,15 @@ KEY = (1, None)
 
 class TgBot:
     def __init__(self):
-        self.edits = []
+        self.edits, self.renames, self.rename_error = [], [], None
 
     async def edit_message_reply_markup(self, chat_id, msg_id, reply_markup=None):
         self.edits.append(msg_id)
+
+    async def edit_forum_topic(self, chat_id, thread_id, name):
+        self.renames.append(name)
+        if self.rename_error:
+            raise self.rename_error
 
 
 class Out:
@@ -394,3 +400,92 @@ async def test_prompt_of_a_cut_turn_taken_off_is_asked_again(bot):
     assert bot.delivered == [] and state.prompt is None
     await bot._check_limit(KEY, state)
     assert state.prompt["kind"] == "limit" and len(state.held) == 1
+
+
+TOPIC = (1, 5)
+
+
+@pytest.fixture
+def topic(bot):
+    bot.cfg.compact_at = 150_000
+    bot._titles_pause = 0.0
+    (bot.cfg.workdir / "web").mkdir()
+    state = ConvState(cwd=str(bot.cfg.workdir / "web"), session_id="s1", title="web", context_tokens=45_000)
+    bot.store.put(TOPIC, state)
+    return bot, state
+
+
+async def test_topic_name_shows_the_status_and_only_changes_when_it_does(topic):
+    bot, state = topic
+    await bot._check_title(TOPIC, state)
+    await bot._check_title(TOPIC, state)
+    assert bot.app.bot.renames == ["💤·7️⃣·web"]
+    assert bot.store.get(TOPIC).shown_title == "💤·7️⃣·web"
+
+
+async def test_topic_name_with_everything_on(topic):
+    bot, state = topic
+    state.last_api_at = bot_mod.time.time() - 600
+    bot.sessions[TOPIC] = SimpleNamespace(state=state, pending=True, connected=True, queued=2)
+    await bot._check_title(TOPIC, state)
+    assert bot.app.bot.renames == ["⚙️·7️⃣·45m·web·📨2"]
+
+
+async def test_topic_name_while_stopped_by_a_limit_counts_what_waits(topic):
+    bot, state = topic
+    state.limit_until, state.held = 2_000_000_000.0, [{"text": "one", "ids": []}]
+    state.last_api_at = 1.0
+    await bot._check_title(TOPIC, state)
+    assert bot.app.bot.renames == ["⏸·7️⃣·🧊·web·📨1"]
+
+
+async def test_topic_with_an_unknown_name_is_left_alone(topic):
+    bot, state = topic
+    state.title = None
+    await bot._check_title(TOPIC, state)
+    assert bot.app.bot.renames == []
+
+
+async def test_name_learned_from_the_topic_creation_a_message_points_at(topic):
+    bot, state = topic
+    state.title = None
+    created = SimpleNamespace(forum_topic_created=SimpleNamespace(name="Mi web"))
+    bot._learn_title(TOPIC, SimpleNamespace(reply_to_message=created))
+    assert state.title == "Mi web"
+    bot._learn_title(TOPIC, SimpleNamespace(reply_to_message=SimpleNamespace(forum_topic_created=None)))
+    assert state.title == "Mi web"
+
+
+async def test_telegram_asking_to_slow_down_pauses_all_renames(topic):
+    bot, state = topic
+    bot.app.bot.rename_error = RetryAfter(30)
+    await bot._check_title(TOPIC, state)
+    assert state.shown_title is None and bot._titles_pause > bot_mod.time.time()
+    bot.app.bot.rename_error = None
+    await bot._check_title(TOPIC, state)
+    assert len(bot.app.bot.renames) == 1
+
+
+async def test_a_topic_that_refuses_the_rename_is_not_retried_until_it_changes(topic):
+    bot, state = topic
+    bot.app.bot.rename_error = BadRequest("Topic_id_invalid")
+    await bot._check_title(TOPIC, state)
+    await bot._check_title(TOPIC, state)
+    assert len(bot.app.bot.renames) == 1
+
+
+async def test_only_our_own_rename_notices_are_deleted(bot):
+    bot.app.bot.id = 99
+    deleted = []
+
+    async def delete():
+        deleted.append(True)
+
+    def update(user_id):
+        msg = SimpleNamespace(forum_topic_edited=SimpleNamespace(name="x"), delete=delete)
+        return SimpleNamespace(effective_user=SimpleNamespace(id=user_id, username="u"), effective_message=msg)
+
+    await bot._on_stranger(update(7), None)
+    assert deleted == []
+    await bot._on_stranger(update(99), None)
+    assert deleted == [True]
