@@ -10,6 +10,15 @@ COLD, QUEUED = "🧊", "📨"
 CACHE_STEPS = (45, 30, 15, 10, 5, 2, 1)
 MAX_LENGTH = 128  # Telegram's limit for a topic's name
 
+LEGEND = (
+    f"Topic names show how each conversation stands, e.g. {WORKING}·7️⃣·30m·web·{QUEUED}2\n"
+    f"{WORKING} working, {LIMITED} stopped by a plan limit, {ASLEEP} asleep (nothing: awake and idle)\n"
+    f"{KEYCAPS[0]}…{KEYCAPS[10]} room left until it compacts: 7️⃣ is 70%\n"
+    f"30m prompt cache left, at least; {COLD} gone, so the next message re-sends everything\n"
+    "web the topic's name\n"
+    f"{QUEUED}2 messages waiting for Claude"
+)
+
 _STATUS_FIELD = re.compile(
     "|".join(map(re.escape, (WORKING, LIMITED, ASLEEP, COLD, *KEYCAPS))) + rf"|\d+m|{QUEUED}\d+"
 )

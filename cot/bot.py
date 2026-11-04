@@ -793,7 +793,8 @@ class Bot:
             "Write to talk to Claude; send files and it gets them too.\n\n"
             f"{cmds}\n\n"
             "Other /commands are passed to Claude (e.g. /compact).\n"
-            "Parallel conversations: one per Telegram topic, each with its own /cwd."
+            "Parallel conversations: one per Telegram topic, each with its own /cwd.\n\n"
+            f"{titles.LEGEND}"
         )
 
     def _subdirs(self) -> list[str]:

@@ -37,3 +37,8 @@ def test_a_long_name_gives_way():
 )
 def test_plain_takes_the_status_out_of_an_edited_title(edited, name):
     assert titles.plain(edited) == name
+
+
+def test_legend_explains_every_field():
+    for field in (titles.WORKING, titles.LIMITED, titles.ASLEEP, titles.COLD, titles.QUEUED, *titles.KEYCAPS[::10]):
+        assert field in titles.LEGEND
