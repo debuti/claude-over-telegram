@@ -48,6 +48,7 @@ def test_a_long_name_gives_way():
         ("⚙️·7️⃣·30m·web·📨2", "web"),
         ("💤·🔟·🧊·Mi web", "Mi web"),
         ("❓·7️⃣·web", "web"),
+        ("🟢·7️⃣·web", "web"),
         ("7️⃣·>45m·web", "web"),
         ("web", "web"),
         ("a·b", "a·b"),
@@ -59,6 +60,6 @@ def test_plain_takes_the_status_out_of_an_edited_title(edited, name):
 
 
 def test_legend_explains_every_field():
-    states = (titles.WORKING, titles.ASKING, titles.LIMITED, titles.ASLEEP)
+    states = (titles.WORKING, titles.ASKING, titles.LIMITED, titles.IDLE, titles.ASLEEP)
     for field in (*states, titles.COLD, titles.QUEUED, *titles.KEYCAPS[::10]):
         assert field in titles.LEGEND

@@ -3,7 +3,7 @@
 import re
 
 KEYCAPS = ("0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟")
-WORKING, ASKING, LIMITED, ASLEEP = "⚙️", "❓", "⏸", "💤"
+WORKING, ASKING, LIMITED, IDLE, ASLEEP = "⚙️", "❓", "⏸", "🟢", "💤"
 COLD, QUEUED = "🧊", "📨"
 # Telegram posts a service message per rename, so the cache's time moves in steps (minutes), never
 # overstating what's left.
@@ -14,7 +14,7 @@ MAX_LENGTH = 128  # Telegram's limit for a topic's name
 LEGEND = (
     f"Topic names show how each conversation stands, e.g. {WORKING}·7️⃣·30m·web·{QUEUED}2\n"
     f"{WORKING} working, {ASKING} waiting for your permission, {LIMITED} stopped by a plan limit, "
-    f"{ASLEEP} asleep (nothing: awake and idle)\n"
+    f"{IDLE} awake, waiting for you, {ASLEEP} asleep\n"
     f"{KEYCAPS[0]}…{KEYCAPS[10]} room left until it compacts: 7️⃣ is 70%\n"
     f"30m until the prompt cache is lost, at least, keep-alives included; {COLD} gone: the next message re-sends all\n"
     "web the topic's name\n"
@@ -22,7 +22,7 @@ LEGEND = (
 )
 
 _STATUS_FIELD = re.compile(
-    "|".join(map(re.escape, (WORKING, ASKING, LIMITED, ASLEEP, COLD, *KEYCAPS))) + rf"|>?\d+m|{QUEUED}\d+"
+    "|".join(map(re.escape, (WORKING, ASKING, LIMITED, IDLE, ASLEEP, COLD, *KEYCAPS))) + rf"|>?\d+m|{QUEUED}\d+"
 )
 
 

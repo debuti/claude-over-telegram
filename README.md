@@ -208,7 +208,7 @@ If the limit cut Claude's work short, the same question offers to carry on with 
 All this survives a restart too, and `/stop` drops it.
 
 Each topic's name shows how it stands, e.g. `⚙️·7️⃣·30m·web·📨2`: ⚙️ working, ❓ waiting for
-your permission, ⏸ stopped by a plan limit or 💤 asleep (nothing while awake and idle); tenths of the room left
+your permission, ⏸ stopped by a plan limit, 🟢 awake and waiting for you or 💤 asleep; tenths of the room left
 until it compacts, `7️⃣` being 70%; time until the prompt cache is really lost, counting the keep-alives
 that conversation will get (none below `WAKE_SMALL_TOKENS` or during a plan limit), in steps, or
 🧊 once gone; its name; and messages waiting. It changes at most every 15 seconds, and the

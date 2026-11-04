@@ -655,7 +655,7 @@ class Bot:
         elif sess and sess.pending:
             status = titles.WORKING
         else:
-            status = "" if sess and sess.connected else titles.ASLEEP
+            status = titles.IDLE if sess and sess.connected else titles.ASLEEP
         room = ""
         if self.cfg.compact_at:  # the same size Session._needs_compact goes by
             room = titles.room(state.context_tokens, max(self.cfg.compact_at, 2 * state.after_compact))

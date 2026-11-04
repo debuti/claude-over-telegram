@@ -450,6 +450,13 @@ async def test_topic_name_counts_the_keep_alives_this_conversation_gets(topic, t
     assert bot.app.bot.renames == [shown]
 
 
+async def test_topic_name_when_awake_and_idle(topic):
+    bot, state = topic
+    bot.sessions[TOPIC] = SimpleNamespace(state=state, waiting=False, pending=False, connected=True, queued=0)
+    await bot._check_title(TOPIC, state)
+    assert bot.app.bot.renames == ["🟢·7️⃣·web"]
+
+
 async def test_topic_name_while_waiting_for_permission(topic):
     bot, state = topic
     bot.sessions[TOPIC] = SimpleNamespace(state=state, waiting=True, pending=True, connected=True, queued=0)
