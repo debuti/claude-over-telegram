@@ -211,9 +211,12 @@ def usd_per_token(path: Path) -> float | None:
 
 
 # A new conversation's first request (Claude Code's system prompt, tools and skills; measured
-# on 2026-10-29), and what a compaction leaves when the conversation's own isn't known yet.
+# on 2026-10-29) and the part of it all conversations share, usually in the cache. What a compaction
+# leaves when the conversation's own isn't known yet, and what it writes (the rest is files it adds back).
 STARTUP = 19_000
+SHARED = 8_600
 SUMMARY = 20_000
+COMPACT_OUTPUT = 2_000
 
 
 @dataclass(frozen=True)
@@ -223,7 +226,7 @@ class WakeCosts:
     context: int
     summary: int  # what compacting leaves, re-read by every later step instead of the context
     keep: float  # continue as it is: the whole context written to the cache again
-    compact: float  # summarise it (reading it all once, writing the summary), then go on from that
+    compact: float  # summarise it (reading it all once, uncached), then write the result to the cache
     new: float  # a new conversation's first request
 
 
@@ -234,7 +237,7 @@ def wake_costs(context: int, after_compact: int, ttl: int) -> WakeCosts:
         context=context,
         summary=summary,
         keep=context * w,
-        compact=context * w + summary * OUTPUT + summary * w,
+        compact=context + COMPACT_OUTPUT * OUTPUT + max(summary - SHARED, 0) * w,
         new=STARTUP * w,
     )
 

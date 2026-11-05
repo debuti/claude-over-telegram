@@ -1,5 +1,6 @@
 """Held messages and the nonce-guarded prompt, with Telegram and the sessions stubbed out."""
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,9 @@ class TgBot:
 
     async def edit_message_reply_markup(self, chat_id, msg_id, reply_markup=None):
         self.edits.append(msg_id)
+
+    async def delete_message(self, chat_id, msg_id):
+        pass
 
     async def edit_forum_topic(self, chat_id, thread_id, name):
         self.renames.append(name)
@@ -647,3 +651,16 @@ async def test_only_our_own_rename_notices_are_deleted(bot):
     assert deleted == []
     await bot._on_stranger(update(99), None)
     assert deleted == [True]
+
+
+async def test_compacted_conversation_has_no_cache_alarms(bot, monkeypatch):
+    monkeypatch.setattr(Bot, "_assigned", lambda self, key: True)
+    bot.cfg.keepalive, bot.cfg.cache_alarms, bot.alarms = 3600, (5,), {}
+    state = bot.store.get(KEY)
+    state.last_api_at, state.context_tokens = time.time() - 3400, 40_000  # 2 min left
+    state.last_active = state.last_api_at
+    await bot._check_alarm(KEY, state)
+    assert bot.alarms[KEY]["step"] == 5
+    state.context_tokens = 0  # as compacting leaves it
+    await bot._check_alarm(KEY, state)
+    assert KEY not in bot.alarms

@@ -282,6 +282,8 @@ class Bot:
             on_state=lambda st: self.store.put(key, st),
             default_mode=self.cfg.permission_mode,
             compact_at=self.cfg.compact_at,
+            # With WAKE=ask whether to compact is the user's to say, when they come back.
+            compact_asleep=self.cfg.wake_small if self.cfg.compact_at and self.cfg.wake == "auto" else 0,
             ttl=self.ttl,
             **self._runner(Path(state.cwd)),
         )
@@ -867,10 +869,13 @@ class Bot:
         sess = self.sessions.get(key)
         state = sess.state if sess else state
         alarm = self.alarms.get(key)
-        if alarm and alarm["at"] != state.last_api_at:  # used again (or reset): the cache is fresh
+        # Used again or reset: the cache is fresh. Compacted: there's nothing left to warn about.
+        if alarm and (alarm["at"] != state.last_api_at or not state.context_tokens):
             await self._delete_alarm(key)
             alarm = None
         if not state.session_id or not state.last_api_at or (sess and sess.pending) or not self._assigned(key):
+            return
+        if not state.context_tokens:
             return
         if state.login_lost_at or state.limit_until or state.limit_cut:
             return

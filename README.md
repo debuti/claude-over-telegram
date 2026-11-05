@@ -289,8 +289,9 @@ which and why, with what each way costs in tokens, euros and share of the 5-hour
 window. If Haiku can't answer, or with `WAKE=ask`, the bot holds the message and
 asks instead: continue, compact and continue, another conversation from the list,
 or a new one. A conversation whose context passes `AUTO_COMPACT_TOKENS` (150k) is compacted
-(`/compact`) before its next message, or before its process stops, while the cache
-still holds it. Claude itself compacts at that size too, also in the middle of a long
+(`/compact`) before its next message. With `WAKE=auto`, one past `WAKE_SMALL_TOKENS`
+also compacts before its process stops, a few minutes before the cache really goes (after
+the last keep-alive), at about a quarter of what compacting it cold costs. Claude itself compacts at that size too, also in the middle of a long
 task: otherwise it would wait until 967k (Opus has a 1M-token window), and each of a
 long task's hundreds of calls re-reads the whole context. Conversations survive
 restarts (`state/sessions.json`).

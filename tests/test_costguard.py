@@ -121,7 +121,7 @@ def test_cache_left():
 def test_wake_costs():
     c = costguard.wake_costs(100_000, 0, 3600)
     assert c.keep == 200_000 and c.new == costguard.STARTUP * 2
-    assert c.summary == costguard.SUMMARY and c.compact > c.keep
+    assert c.summary == costguard.SUMMARY and c.compact == 100_000 + 10_000 + 11_400 * 2
     assert costguard.wake_costs(100_000, 8_000, 300).summary == 8_000
 
 

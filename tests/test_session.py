@@ -1,10 +1,11 @@
 import asyncio
+import json
 import time
 
 import pytest
 
 from cot import session as session_mod
-from cot.session import Session
+from cot.session import Session, transcript_context
 from cot.store import ConvState
 
 from .fakes import INTERRUPT, FakeClient, FakeOutput, answer, compact_failed, limit_event, limit_hit, login_lost, result
@@ -417,3 +418,30 @@ async def test_limit_message_leaves_the_context_and_cache_figures_alone():
     await until(lambda: sess.limits)
     assert sess.state.context_tokens == 90_000 and sess.state.last_api_at == 123.0
     await sess.close()
+
+
+@pytest.mark.parametrize(
+    "context, ttl, compacts",
+    [(40_000, 3600, True), (10_000, 3600, False), (40_000, 30, False)],  # small, and already cold (margin 60 s)
+)
+async def test_compacts_before_sleeping_only_big_and_warm(monkeypatch, context, ttl, compacts):
+    monkeypatch.setattr("cot.session.idle_disconnect", lambda: 0.05)
+    sess = make(compact_asleep=30_000, ttl=ttl)
+    FakeClient.scripts = [[answer(read=context, write=0), result()], [result()]]
+    await sess.send("hi")
+    await until(lambda: sess.entries and not sess.connected)
+    assert FakeClient.queries == (["hi", "/compact"] if compacts else ["hi"])
+    assert sess.state.context_tokens == (0 if compacts else context + 5)
+    await sess.close()
+
+
+def test_transcript_context_starts_over_at_a_compaction(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    path = tmp_path / "projects" / "x" / "s.jsonl"
+    path.parent.mkdir(parents=True)
+    said = {"type": "assistant", "message": {"usage": {"input_tokens": 500}}}
+    lines = [said, {"type": "system", "subtype": "compact_boundary"}]
+    path.write_text("\n".join(json.dumps(e) for e in lines))
+    assert transcript_context("s")[0] == 0
+    path.write_text("\n".join(json.dumps(e) for e in [*lines, said]))
+    assert transcript_context("s")[0] == 500

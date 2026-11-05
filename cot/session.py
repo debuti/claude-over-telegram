@@ -123,12 +123,14 @@ def transcript_context(session_id: str) -> tuple[int, float]:
             mtime = max(mtime, path.stat().st_mtime)
             with path.open(errors="ignore") as f:
                 for line in f:
-                    if '"assistant"' not in line or '"usage"' not in line:
+                    if '"compact_boundary"' not in line and ('"assistant"' not in line or '"usage"' not in line):
                         continue
                     try:
                         e = json.loads(line)
                     except ValueError:
                         continue
+                    if e.get("subtype") == "compact_boundary":  # what came before is no longer sent
+                        context = 0
                     usage = (e.get("message") or {}).get("usage") if e.get("type") == "assistant" else None
                     if usage and not e.get("isSidechain"):
                         context = sum(usage.get(k) or 0 for k in TOKEN_KINDS[:3])
@@ -163,6 +165,7 @@ class Session:
         cli_env: dict[str, str],
         sandbox_bash: bool,
         compact_at: int = 0,
+        compact_asleep: int = 0,
         ttl: int = 3600,
     ):
         self.state = state
@@ -174,6 +177,7 @@ class Session:
         self._cli_env = cli_env
         self._ttl = ttl  # seconds the prompt cache lives (costguard.cache_ttl)
         self._compact_at = compact_at  # context size (tokens) that compacts before the next turn; 0: never
+        self._compact_asleep = compact_asleep  # context size that compacts before the process stops; 0: never
         self.compact_next = False  # compact before the next turn whatever the size
         self._compacting = False
         self._keepalive = False  # the running turn only keeps the cache warm: nothing to show
@@ -394,9 +398,7 @@ class Session:
                 idle = time.monotonic() - self._last_activity
                 if self.busy or idle < idle_disconnect() or (self._tasks and idle < TASK_WAIT):
                     continue
-                if self._alive() and self._needs_compact():
-                    # Now, while the cache still holds the context: once it expires compacting
-                    # reads all of it at full price.
+                if self._alive() and self._compacts_asleep():
                     self.busy = True
                     try:
                         await self._compact("before it goes to sleep")
@@ -448,6 +450,15 @@ class Session:
         # One that compaction can't bring down much shouldn't compact on every message.
         floor = max(self._compact_at, 2 * self.state.after_compact)
         return self.compact_next or bool(self._compact_at and self.state.context_tokens >= floor)
+
+    def _compacts_asleep(self) -> bool:
+        """Now, while the cache still holds the context: once it expires compacting reads all of
+        it at full price, about 4 times more (usage.jsonl, 2026-10-24 to 11-05)."""
+        if costguard.is_cold(time.time(), self.state.last_api_at, self._ttl):
+            return False
+        return self._needs_compact() or bool(
+            self._compact_asleep and self.state.context_tokens >= self._compact_asleep
+        )
 
     async def _compact(self, when: str) -> None:
         self.compact_next = False
