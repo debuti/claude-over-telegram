@@ -281,6 +281,12 @@ class Bot:
             await asyncio.sleep(4)
         self.typing.pop(key, None)
 
+    def _remember(self, key: Key, text: str, ids: list[int] | None) -> None:
+        for msg_id in ids or []:
+            self.texts[key[0], msg_id] = text
+        while len(self.texts) > KEEP_TEXTS:
+            del self.texts[next(iter(self.texts))]
+
     async def _submit(self, key: Key, text: str, ids: list[int] | None = None, check: bool = True) -> None:
         """Hand a message to the conversation, unless a warning holds it back first.
 
@@ -294,6 +300,7 @@ class Bot:
                     key, "Pick the folder for this topic; your message goes to Claude right after:"
                 )
             return
+        self._remember(key, text, ids)
         state = self._state(key)
         # A warning or a plan limit is already holding some, or asking about the cut turn: this one waits too.
         if state.held or (state.limit_cut and not state.limit_until):
@@ -611,15 +618,13 @@ class Bot:
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
         self._learn_title(self._key(update), msg)
-        # Telegram can report an edit that changed nothing: it was sent already.
+        # Telegram can report an edit that changed nothing (seemingly on reacting to a message
+        # that has been waiting a while, not confirmed): it was sent already.
         unchanged = update.edited_message and self.texts.get((msg.chat_id, msg.message_id)) == msg.text
         if update.edited_message:
             log.info("message %s edited (%s)", msg.message_id, "same text, ignored" if unchanged else "text changed")
         if unchanged:
             return
-        self.texts[msg.chat_id, msg.message_id] = msg.text
-        while len(self.texts) > KEEP_TEXTS:
-            del self.texts[next(iter(self.texts))]
         await self._submit(self._key(update), msg.text, [msg.message_id])
 
     async def _on_file(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -659,6 +664,8 @@ class Bot:
         await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in COMMANDS])
         # Messages that were waiting for Claude when the bot stopped.
         for key, state in self.store.items():
+            for item in state.pending + state.held:  # sent before the restart
+                self._remember(key, item["text"], item["ids"])
             if state.pending and self._assigned(key):
                 if await self._blocked():
                     pending, state.pending = state.pending, []

@@ -66,7 +66,7 @@ def bot(tmp_path, monkeypatch):
     b.ttl = 3600
     b.store = Store(tmp_path / "sessions.json")
     b.store.put(KEY, ConvState(cwd=str(tmp_path), session_id="s1"))
-    b.sessions, b.no_folder = {}, {}
+    b.sessions, b.no_folder, b.texts = {}, {}, {}
     b.app = SimpleNamespace(bot=TgBot())
     b.out = Out()
     b.delivered = []
@@ -119,7 +119,7 @@ async def test_hold_then_choose(bot):
 
 
 async def test_edit_that_changed_nothing_is_not_sent_again(bot):
-    bot.hold, bot.texts = False, {}
+    bot.hold = False
     bot._key = lambda update: KEY
     bot._learn_title = lambda key, msg: None
     msg = SimpleNamespace(chat_id=1, message_id=7, text="one")
@@ -129,6 +129,17 @@ async def test_edit_that_changed_nothing_is_not_sent_again(bot):
     msg.text = "two"  # a real correction still goes
     await bot._on_text(SimpleNamespace(effective_message=msg, edited_message=msg), None)
     assert bot.delivered == ["one", "two"]
+
+
+async def test_edit_of_a_message_held_for_a_while_is_not_sent_again(bot):
+    bot._key = lambda update: KEY
+    bot._learn_title = lambda key, msg: None
+    await bot._submit(KEY, "one", [7])
+    query, rest = tap(bot, "continue")
+    await bot._on_guard(KEY, query, rest)
+    msg = SimpleNamespace(chat_id=KEY[0], message_id=7, text="one")
+    await bot._on_text(SimpleNamespace(effective_message=msg, edited_message=msg), None)
+    assert bot.delivered == ["one"]
 
 
 async def test_stale_nonce_does_nothing(bot):
