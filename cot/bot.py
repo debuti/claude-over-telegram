@@ -2,7 +2,11 @@
 
 import asyncio
 import logging
+import os
+import re
 import secrets
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -32,7 +36,7 @@ from . import (
     usage,
     usagelog,
 )
-from .config import Config
+from .config import REPO_DIR, Config
 from .output import TelegramOutput
 from .render import esc
 from .session import Session, transcript_context, transcript_cost
@@ -101,6 +105,23 @@ MODELS = {
 }
 
 
+def newer_version(repo: Path) -> str | None:
+    """The checkout's version if it isn't the one running and it is all committed: not half-way through a change."""
+    try:
+        found = re.search(r'__version__ = "(.+)"', (repo / "cot" / "__init__.py").read_text())
+        if not found or found[1] == __version__:
+            return None
+        status = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return found[1] if status.returncode == 0 and not status.stdout.strip() else None
+
+
 class Bot:
     def __init__(self, cfg: Config, cli_path: str | None, cli_env: dict[str, str]):
         self.cfg = cfg
@@ -115,6 +136,7 @@ class Bot:
         self.texts: dict[tuple[int, int], str] = {}
         self.login: login.Login | None = None
         self.ttl = costguard.cache_ttl(cfg)
+        self._restarting = False
         # The cache alarm last sent per conversation: {"at": last_api_at it counts from, "step", "msg_id"}.
         self.alarms: dict[Key, dict] = {}
         self._alarm_task: asyncio.Task | None = None
@@ -167,6 +189,8 @@ class Bot:
     def run(self) -> None:
         # Retry forever: the bot runs unattended and must survive network blips at startup.
         self.app.run_polling(allowed_updates=Update.ALL_TYPES, bootstrap_retries=-1)
+        if self._restarting:
+            os.execv(sys.executable, sys.orig_argv)
 
     @staticmethod
     def _key(update: Update) -> Key:
@@ -752,6 +776,33 @@ class Bot:
                         await self._check_alarm(key, state)
                 except Exception:
                     log.exception("login or plan limit check, cache alarm or keep-alive failed")
+            try:
+                await self._restart_if_outdated()
+            except Exception:
+                log.exception("restart check failed")
+
+    def _all_asleep(self) -> bool:
+        """No Claude process up, no cache left to lose and nothing under way: a restart costs nothing."""
+        if self.login and self.login.waiting:
+            return False
+        if any(sess.pending or sess.connected for sess in self.sessions.values()):
+            return False
+        now = time.time()
+        return all(costguard.cache_left(now, state.last_api_at, self.ttl) <= 0 for _, state in self.store.items())
+
+    async def _restart_if_outdated(self) -> None:
+        """Takes up a new version as soon as everything sleeps, rather than at the daily restart."""
+        if self._restarting or not self._all_asleep():
+            return
+        version = await asyncio.to_thread(newer_version, REPO_DIR)
+        if not version:
+            return
+        # One still running was kept for what the user left in it: it isn't asleep yet.
+        if self.cfg.docker and await asyncio.to_thread(container.any_running):
+            return
+        log.info("all asleep: restarting from v%s to v%s", __version__, version)
+        self._restarting = True
+        self.app.stop_running()
 
     def _title(self, key: Key, state: ConvState) -> str:
         """The topic's name as it should stand now."""

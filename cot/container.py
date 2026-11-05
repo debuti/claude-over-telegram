@@ -56,6 +56,12 @@ def stop_claude(name: str) -> None:
     _docker("exec", name, "pkill", "-x", "claude", capture_output=True, check=False)
 
 
+def any_running() -> bool:
+    """True while an agent container runs, or if that can't be told."""
+    ps = _docker("ps", "-q", "--filter", "label=cot.agent=1", capture_output=True, check=False)
+    return ps.returncode != 0 or bool(ps.stdout.strip())
+
+
 def reap(name: str) -> None:
     """End Claude in the container, and remove it unless something else still runs there."""
     stop_claude(name)

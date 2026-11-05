@@ -161,7 +161,9 @@ without installing anything. Stop `run.sh` first if it is running.
 
 It also installs `claude-over-telegram-restart.timer`, which restarts the bot every
 day at 4:00, so it picks up `git pull`s and starts fresh. Messages waiting for Claude
-survive the restart; a task Claude is working on at that time is cut short. Pick
+survive the restart; a task Claude is working on at that time is cut short. It doesn't
+wait for 4:00 if a new version is committed and everything sleeps: no Claude process
+up, no agent container running, no cache left to lose and nothing under way. Pick
 another time with `DAILY_RESTART=05:30 ./install-service.sh …`, or none with
 `DAILY_RESTART=off`.
 
