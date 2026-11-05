@@ -1,5 +1,6 @@
 """Held messages and the nonce-guarded prompt, with Telegram and the sessions stubbed out."""
 
+import json
 import time
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ from telegram.error import BadRequest, RetryAfter
 from cot import bot as bot_mod
 from cot import login, triage, usage
 from cot.bot import CONTINUE_PROMPT, Bot
+from cot.session import KEEPALIVE_PROMPT
 from cot.store import ConvState, Store
 
 KEY = (1, None)
@@ -664,3 +666,19 @@ async def test_compacted_conversation_has_no_cache_alarms(bot, monkeypatch):
     state.context_tokens = 0  # as compacting leaves it
     await bot._check_alarm(KEY, state)
     assert KEY not in bot.alarms
+
+
+def test_excerpt_leaves_keepalives_out_and_keeps_how_messages_end(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    path = tmp_path / "projects" / "x" / "s.jsonl"
+    path.parent.mkdir(parents=True)
+    said = [
+        ("user", "hi"),
+        ("assistant", "x" * 1000 + " shall I go on?"),
+        ("user", KEEPALIVE_PROMPT),
+        ("assistant", "ok"),
+    ]
+    lines = [json.dumps({"type": t, "message": {"content": c}}) for t, c in said]
+    path.write_text("\n".join(lines))
+    got = triage.excerpt("s").splitlines()
+    assert len(got) == 2 and got[0] == "User: hi" and got[1].endswith("shall I go on?")

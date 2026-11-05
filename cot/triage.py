@@ -16,7 +16,7 @@ from pathlib import Path
 
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, query
 
-from .session import _transcripts
+from .session import KEEPALIVE_PROMPT, _transcripts
 
 log = logging.getLogger(__name__)
 
@@ -57,9 +57,16 @@ def _text(content) -> str:
     return ""
 
 
+def _shortened(text: str) -> str:
+    """Its start and its end, where a message asks what comes next."""
+    return text if len(text) <= CHARS else f"{text[:CHARS // 2]} […] {text[-CHARS // 2:]}"
+
+
 def excerpt(session_id: str) -> str:
     """The conversation's last exchanges (main thread only), oldest first; "" if unreadable."""
     lines: list[str] = []
+    keepalive = " ".join(KEEPALIVE_PROMPT.split())
+    skip_answer = False
     try:
         for path in _transcripts(session_id):
             with path.open(errors="ignore") as f:
@@ -71,9 +78,13 @@ def excerpt(session_id: str) -> str:
                     if e.get("type") not in ("user", "assistant") or e.get("isSidechain") or e.get("isMeta"):
                         continue
                     text = " ".join(_text((e.get("message") or {}).get("content")).split())
-                    if text:
+                    if text == keepalive:  # nobody said it, and its answer says nothing
+                        skip_answer = True
+                    elif text and skip_answer and e["type"] == "assistant":
+                        skip_answer = False
+                    elif text:
                         who = "User" if e["type"] == "user" else "Assistant"
-                        lines.append(f"{who}: {text[:CHARS]}")
+                        lines.append(f"{who}: {_shortened(text)}")
     except Exception:
         log.warning("could not read the transcript of %s", session_id, exc_info=True)
     return "\n".join(lines[-EXCHANGES:])
