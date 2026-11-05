@@ -90,3 +90,52 @@ def test_newer_version_only_when_committed(tmp_path):
 def test_no_newer_version_on_the_same_one(tmp_path):
     checkout(tmp_path, __version__)
     assert newer_version(tmp_path) is None
+
+
+@pytest.fixture
+def announcer(bot, tmp_path):
+    bot.cfg.state_dir = tmp_path
+    bot.sent, bot.gone = [], set()
+
+    def output(key):
+        async def send_html(text, silent=False):
+            bot.sent.append((key, text, silent))
+            return None if key in bot.gone else 1
+
+        return SimpleNamespace(send_html=send_html)
+
+    bot._assigned, bot._output = lambda key: True, output
+    return bot
+
+
+async def test_a_new_version_is_announced_once_and_quietly(announcer):
+    await announcer._announce_version()
+    await announcer._announce_version()
+    assert announcer.sent == [(KEY, f"🔄 Updated to v{__version__}", True)]
+
+
+async def test_the_same_version_says_nothing(announcer, tmp_path):
+    (tmp_path / "version").write_text(__version__)
+    await announcer._announce_version()
+    assert announcer.sent == []
+
+
+async def test_it_goes_to_the_latest_conversation_or_the_next_if_its_topic_is_gone(announcer, tmp_path):
+    announcer.store.put((1, 3), ConvState(cwd=str(tmp_path), last_active=20.0))
+    announcer.store.put((1, 4), ConvState(cwd=str(tmp_path), last_active=10.0))
+    announcer.gone = {(1, 3)}
+    await announcer._announce_version()
+    assert [key for key, _, _ in announcer.sent] == [(1, 3), (1, 4)]
+
+
+async def test_undelivered_it_tries_again_on_the_next_start(announcer, tmp_path):
+    announcer.gone = {KEY}
+    await announcer._announce_version()
+    assert not (tmp_path / "version").exists()
+
+
+async def test_with_no_conversation_it_only_remembers_the_version(announcer, tmp_path):
+    announcer.store = Store(tmp_path / "empty.json")
+    await announcer._announce_version()
+    assert announcer.sent == []
+    assert (tmp_path / "version").read_text() == __version__

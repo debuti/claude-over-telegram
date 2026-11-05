@@ -89,6 +89,7 @@ AGENT_MESSAGE = (
     "write it. To answer: send_to_agents to {sender}.]\n\n{text}"
 )
 AGENT_TEXT_LIMIT = 3000  # with the prompt around it, what fits in a Telegram message once escaped
+VERSION_NOTICE_TRIES = 3  # conversations to try the "new version" notice in
 
 # What goes to Claude, ahead of any waiting messages, to carry on with a turn a lost login cut short.
 LOGIN_CONTINUE_PROMPT = (
@@ -827,6 +828,7 @@ class Bot:
     async def _post_init(self, app: Application) -> None:
         # Fills Telegram's command menu (the "/" button).
         await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in COMMANDS])
+        await self._announce_version()
         # Messages that were waiting for Claude when the bot stopped.
         for key, state in self.store.items():
             for item in state.pending + state.held:  # sent before the restart
@@ -846,6 +848,22 @@ class Bot:
             if state.held and self._assigned(key) and not limit and not state.login_lost_at:
                 await self._ask_hold(key)
         self._alarm_task = asyncio.create_task(self._alarm_loop())
+
+    async def _announce_version(self) -> None:
+        """Says once, quietly, that a new version is running; restarts on the same one say nothing."""
+        seen = self.cfg.state_dir / "version"
+        if seen.exists() and seen.read_text().strip() == __version__:
+            return
+        known = [(key, state) for key, state in self.store.items() if self._assigned(key)]
+        known.sort(key=lambda item: item[1].last_active, reverse=True)
+        # The most recent conversation; the next ones in case its topic was deleted.
+        for key, _ in known[:VERSION_NOTICE_TRIES]:
+            if await self._output(key).send_html(f"🔄 Updated to v{__version__}", silent=True):
+                break
+        else:
+            if known:  # not delivered: the next start tries again
+                return
+        seen.write_text(__version__)
 
     async def _alarm_loop(self) -> None:
         while True:
