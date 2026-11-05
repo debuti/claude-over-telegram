@@ -307,6 +307,9 @@ the same transcript.
 
 ## Confinement
 
+Besides what follows, the system prompt tells Claude to stick to the project in its
+folder and ask before going into another. That is a request, not a wall.
+
 By default (`SANDBOX_DOCKER=true`) each conversation's Claude runs in its own
 Docker container, together with everything it runs (Bash, builds, tests…). The
 container sees only:
