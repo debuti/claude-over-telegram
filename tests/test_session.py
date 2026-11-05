@@ -276,6 +276,27 @@ async def test_limit_hands_back_the_message_it_turned_down_and_the_queue():
     await sess.close()
 
 
+async def test_the_same_message_twice_goes_once():
+    sess = make()
+    FakeClient.scripts = [[answer(), result()]]
+    await sess.send("one", [7])
+    await sess.send("one", [7])
+    await sess.send("corrected", [7])  # an edit that changed it does go
+    await until(lambda: FakeClient.queries)
+    assert FakeClient.queries == ["one\n\ncorrected"]
+    await sess.close()
+
+
+async def test_a_message_handed_back_can_come_again():
+    sess = without_login(make())
+    FakeClient.scripts = [[login_lost(), result(is_error=True)], [answer(), result()]]
+    await sess.send("one", [7])
+    await until(lambda: sess.lost)
+    await sess.send("one", [7])
+    await until(lambda: FakeClient.queries == ["one", "one"])
+    await sess.close()
+
+
 def without_login(sess):
     sess.lost = []
 

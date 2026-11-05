@@ -676,8 +676,7 @@ class Bot:
             if update.message and login.CODE.fullmatch(msg.text.strip()):
                 await self._finish_login(self._key(update), msg.text.strip())
                 return
-        # Telegram can report an edit that changed nothing (seemingly on reacting to a message
-        # that has been waiting a while, not confirmed): it was sent already.
+        # An edit that changed nothing: it was sent already.
         unchanged = update.edited_message and self.texts.get((msg.chat_id, msg.message_id)) == msg.text
         if update.edited_message:
             log.info("message %s edited (%s)", msg.message_id, "same text, ignored" if unchanged else "text changed")

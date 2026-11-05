@@ -191,6 +191,7 @@ class Session:
         # and whether it cut Claude's work short.
         self.on_limited: Callable[[list[dict], float | None, bool], Awaitable[None]] | None = None
         self.on_login_lost: Callable[[list[dict], bool], Awaitable[None]] | None = None
+        self._sent: set[tuple[tuple[int, ...], str]] = set()  # what send has taken, to spot it again
         self._client: ClaudeSDKClient | None = None
         self._task: asyncio.Task | None = None
         self.busy = False
@@ -274,6 +275,13 @@ class Session:
         self._task = asyncio.create_task(self._run())
 
     async def send(self, text: str, ids: list[int] | None = None) -> None:
+        # The same Telegram message twice, by a route still unknown (2.24 on, after compacting first).
+        # The stack in the log tells which one.
+        sent = (tuple(ids or []), text)
+        if ids and sent in self._sent:
+            log.warning("message %s reached the session again, ignored", ids, stack_info=True)
+            return
+        self._sent.add(sent)
         item = {"text": text, "ids": ids or []}
         self.state.pending.append(item)
         self._on_state(self.state)
@@ -539,6 +547,7 @@ class Session:
     def _take_back(self, turned_down: list[dict]) -> list[dict]:
         """All that was going to Claude, out of the session, in order."""
         items, self.state.pending = turned_down + self.state.pending, []
+        self._sent.clear()  # they'll come again, rightly
         self._handed_back = True
         self._gathered.clear()
         while not self._queue.empty():
