@@ -266,6 +266,9 @@ A conversation that finds something other projects' agents should do can write
 to them, through `list_agents` and `send_to_agents` tools the bot gives it. You
 get a button with the text and the recipients, in every permission mode; nothing
 goes without it, so agents can't chain messages or wake conversations unseen.
+The button doesn't expire and survives restarts, and the agent doesn't wait for
+it: it carries on, and only hears back if you deny the message or it can't be
+delivered.
 
 Once approved, the message shows up in each project's topic as `📨 From <project>`
 and reaches its Claude marked as coming from another agent, not from you. A

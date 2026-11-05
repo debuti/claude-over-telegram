@@ -242,9 +242,7 @@ class Session:
             # The SDK's 1 MB default per message is too small for image/PDF reads (base64).
             max_buffer_size=64 * 1024 * 1024,
             mcp_servers={
-                tg_tools.SERVER: tg_tools.make_server(
-                    self.out, Path(self.state.cwd), agents=self.agents, on_wait=self._set_waiting
-                )
+                tg_tools.SERVER: tg_tools.make_server(self.out, Path(self.state.cwd), agents=self.agents)
             },
             # send_to_agents is allowed here because it asks by itself: permission modes that
             # approve on their own must not let an agent write to the others unseen.

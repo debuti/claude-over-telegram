@@ -50,8 +50,8 @@ class Agents:
     """What the bot offers a conversation for reaching the agents of other projects."""
 
     overview: Callable[[], str]
-    # (projects, text, on_wait) -> how it went. Raises ValueError if the request makes no sense.
-    send: Callable[[list[str], str, Callable[[bool], None]], Awaitable[str]]
+    # (projects, text) -> what became of it. Raises ValueError if the request makes no sense.
+    send: Callable[[list[str], str], Awaitable[str]]
 
 
 def _result(text: str, error: bool = False) -> dict[str, Any]:
@@ -62,7 +62,6 @@ def make_server(
     out: TelegramOutput,
     cwd: Path,
     agents: Agents | None = None,
-    on_wait: Callable[[bool], None] = lambda waiting: None,
 ):
     @tool(
         "send_file",
@@ -95,14 +94,15 @@ def make_server(
 
     @tool(
         "send_to_agents",
-        "Send a message to the agents of other projects, in their Telegram topics. The user approves "
-        "each send with a button, and this returns once they have. Agents answer later, if at all, as "
-        "a new message to you: don't wait for them.",
+        "Send a message to the agents of other projects, in their Telegram topics. This returns at once: "
+        "the message goes when the user approves it with a button, which may take hours. You only hear "
+        "back if they refuse it or it can't be delivered, so don't wait and don't send it again. Agents "
+        "answer later, if at all, as a new message to you.",
         SEND_TO_AGENTS_SCHEMA,
     )
     async def send_to_agents(args: dict[str, Any]) -> dict[str, Any]:
         try:
-            return _result(await agents.send(args["to"], args["text"], on_wait))
+            return _result(await agents.send(args["to"], args["text"]))
         except ValueError as e:
             return _result(str(e), error=True)
 

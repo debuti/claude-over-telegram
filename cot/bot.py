@@ -88,6 +88,7 @@ AGENT_MESSAGE = (
     "[From the agent of the project {sender}, through the Telegram bot. The user let it through but didn't "
     "write it. To answer: send_to_agents to {sender}.]\n\n{text}"
 )
+AGENT_SEND_OUTCOME = "[From the Telegram bot, about your message to other agents: {outcome}. It said:]\n\n{text}"
 AGENT_TEXT_LIMIT = 3000  # with the prompt around it, what fits in a Telegram message once escaped
 VERSION_NOTICE_TRIES = 3  # conversations to try the "new version" notice in
 
@@ -306,7 +307,7 @@ class Bot:
             sess.on_login_lost = lambda items, cut: self._on_login_lost(key, items, cut)
         sess.agents = tg_tools.Agents(
             overview=lambda: self._list_agents(key),
-            send=lambda to, text, on_wait: self._send_to_agents(key, to, text, on_wait),
+            send=lambda to, text: self._send_to_agents(key, to, text),
         )
         sess.start()
         self.sessions[key] = sess
@@ -409,7 +410,8 @@ class Bot:
             lines.append(f"{name}: {status}")
         return "\n".join(lines) or "There are no other projects."
 
-    async def _send_to_agents(self, key: Key, to: list[str], text: str, on_wait) -> str:
+    async def _send_to_agents(self, key: Key, to: list[str], text: str) -> str:
+        """Puts the send before the user. It waits for the button in the state, so no turn hangs on it."""
         names = list(dict.fromkeys(to))
         topics = self._agent_topics(key)
         unknown = [n for n in names if n not in topics]
@@ -423,19 +425,64 @@ class Bot:
         shown = ", ".join(esc(n) + ("" if topics[n] else " (new topic)") for n in names)
         out = self._output(key)
         await out.flush()
-        choice = await permissions.ask(
-            out, f"📨 <b>{esc(sender)} wants to write to:</b> {shown}\n<pre>{esc(text)}</pre>", on_wait
+        html = f"📨 <b>{esc(sender)} wants to write to:</b> {shown}\n<pre>{esc(text)}</pre>"
+        send_id = secrets.token_hex(6)
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Allow", callback_data=f"agent:{send_id}:{permissions.ALLOW}"),
+                    InlineKeyboardButton("❌ Deny", callback_data=f"agent:{send_id}:{permissions.DENY}"),
+                ]
+            ]
         )
+        if await out.send_html(html, reply_markup=keyboard) is None:
+            raise ValueError("The request couldn't be shown to the user: nothing will be sent.")
+        state = self._state(key)
+        state.agent_sends.append({"id": send_id, "sender": sender, "to": names, "text": text, "html": html})
+        self.store.put(key, state)
+        return "Waiting for the user's approval."
+
+    async def _on_agent_send(self, key: Key, query, rest: str) -> None:
+        """The button of a send to other agents: it delivers, and tells the sender only what went wrong."""
+        send_id, _, choice = rest.partition(":")
+        state = self._state(key)
+        item = next((i for i in state.agent_sends if i["id"] == send_id), None)
+        if item is None:
+            await query.answer("This request is no longer active")
+            await query.edit_message_reply_markup(None)
+            return
+        await query.answer()
+        state.agent_sends.remove(item)
+        self.store.put(key, state)
+        names, sender, text = item["to"], item["sender"], item["text"]
+        report, failed = [], []
+        if choice == permissions.ALLOW:
+            topics = self._agent_topics(key)
+            for name in names:
+                try:
+                    if name not in topics:
+                        raise ValueError("it can't be written to any more")
+                    report.append(f"{name}: {await self._deliver_to_agent(key, name, topics[name], sender, text)}")
+                except Exception as e:
+                    log.exception("message to the agent of %s failed", name)
+                    failed.append(f"{name}: not sent ({e})")
+        outcome = f"<b>{permissions.OUTCOME[choice]}</b>"
+        lines = "\n".join(report + failed)
+        try:
+            await query.edit_message_text(
+                f"{item['html']}\n\n{outcome}\n{esc(lines)}"[:4096], parse_mode="HTML", reply_markup=None
+            )
+        except TelegramError as e:
+            log.warning("could not update the send's message: %s", e)
         if choice != permissions.ALLOW:
-            return f"Nothing was sent: {permissions.OUTCOME[choice]}."
-        report = []
-        for name in names:
-            try:
-                report.append(f"{name}: {await self._deliver_to_agent(key, name, topics[name], sender, text)}")
-            except Exception as e:
-                log.exception("message to the agent of %s failed", name)
-                report.append(f"{name}: not sent ({e})")
-        return "\n".join(report)
+            news = f"the user refused it, nothing was sent to {', '.join(names)}"
+        elif failed:
+            news = "; ".join(failed)
+        else:
+            return
+        # A conversation moved to another project since isn't the one that wrote it.
+        if Path(self._state(key).cwd).name == sender:
+            await self._submit(key, AGENT_SEND_OUTCOME.format(outcome=news, text=text))
 
     async def _deliver_to_agent(self, key: Key, name: str, topic: Key | None, sender: str, text: str) -> str:
         if topic is None:
@@ -446,7 +493,7 @@ class Bot:
         # Posted first: it's what the user sees of it, and without it (a topic deleted since) nothing goes.
         msg_id = await self._output(topic).send_html(f"📨 <b>From {esc(sender)}</b>\n{esc(text)}")
         if msg_id is None:
-            return f"not sent: its topic doesn't take messages (deleted? the user can open a new one for {name})"
+            raise ValueError(f"its topic doesn't take messages (deleted? the user can open a new one for {name})")
         await self._submit(topic, AGENT_MESSAGE.format(sender=sender, text=text), [msg_id])
         if any(item["ids"] == [msg_id] for item in self._state(topic).held):
             return "held until the user decides (its conversation is asleep, or a limit stops it)"
@@ -1125,7 +1172,7 @@ class Bot:
         state = ConvState(cwd=str(path), mode=old.mode, model=old.model, tools=old.tools, title=old.title)
         # The new conversation gets them.
         state.held, state.limit_until, state.limit_auto = old.held, old.limit_until, old.limit_auto
-        state.login_lost_at = old.login_lost_at
+        state.login_lost_at, state.agent_sends = old.login_lost_at, old.agent_sends
         self.store.put(key, state)
         if old.prompt:
             try:
@@ -1438,6 +1485,8 @@ class Bot:
             await query.answer(None if ok else "This request is no longer active")
             if not ok:
                 await query.edit_message_reply_markup(None)
+        elif kind == "agent":
+            await self._on_agent_send(key, query, rest)
         elif kind == "cwd":
             await query.answer()
             await query.edit_message_reply_markup(None)

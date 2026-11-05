@@ -41,6 +41,8 @@ class ConvState:
     login_lost_at: float = 0.0
     # The warning whose buttons are live: {"nonce", "msg_id", "kind"}; at most one per conversation.
     prompt: dict | None = None
+    # Messages to other agents waiting for the user's button ({"id", "sender", "to", "text", "html"}).
+    agent_sends: list[dict] = field(default_factory=list)
 
 
 def _migrate(v: dict) -> dict:
