@@ -646,7 +646,7 @@ async def test_only_our_own_rename_notices_are_deleted(bot):
         deleted.append(True)
 
     def update(user_id):
-        msg = SimpleNamespace(forum_topic_edited=SimpleNamespace(name="x"), delete=delete)
+        msg = SimpleNamespace(forum_topic_edited=SimpleNamespace(name="x"), forum_topic_created=None, delete=delete)
         return SimpleNamespace(effective_user=SimpleNamespace(id=user_id, username="u"), effective_message=msg)
 
     await bot._on_stranger(update(7), None)

@@ -30,6 +30,7 @@ from . import (
     login,
     permissions,
     server,
+    tg_tools,
     titles,
     triage,
     uploads,
@@ -81,6 +82,13 @@ COMPACT_BUFFER = 33_000
 
 # A plan limit that doesn't say when it resets: seconds until the bot looks again.
 LIMIT_RETRY = 5 * 60
+
+# How a message from another conversation's agent reaches Claude; never as a bare text, which could be a /command.
+AGENT_MESSAGE = (
+    "[From the agent of the project {sender}, through the Telegram bot. The user let it through but didn't "
+    "write it. To answer: send_to_agents to {sender}.]\n\n{text}"
+)
+AGENT_TEXT_LIMIT = 3000  # with the prompt around it, what fits in a Telegram message once escaped
 
 # What goes to Claude, ahead of any waiting messages, to carry on with a turn a lost login cut short.
 LOGIN_CONTINUE_PROMPT = (
@@ -295,6 +303,10 @@ class Bot:
         sess.on_limited = lambda items, resets, cut: self._on_limited(key, items, resets, cut)
         if not self.cfg.api_key:  # a wrong API key won't come back on its own: its error says so
             sess.on_login_lost = lambda items, cut: self._on_login_lost(key, items, cut)
+        sess.agents = tg_tools.Agents(
+            overview=lambda: self._list_agents(key),
+            send=lambda to, text, on_wait: self._send_to_agents(key, to, text, on_wait),
+        )
         sess.start()
         self.sessions[key] = sess
         if state.pending:
@@ -368,6 +380,76 @@ class Bot:
         sess = self._session(key)
         await sess.send(text, ids)
         self._ensure_typing(key, sess)
+
+    def _agent_topics(self, key: Key) -> dict[str, Key | None]:
+        """The other projects, with the topic that speaks for each in this chat: its latest active, or None."""
+        topics: dict[str, Key | None] = dict.fromkeys(self._subdirs())
+        for other, state in self.store.items():
+            name = Path(state.cwd).name
+            if other[0] != key[0] or not other[1] or name not in topics or not self._valid_cwd(other, Path(state.cwd)):
+                continue
+            current = topics[name]
+            if current is None or state.last_active >= self._state(current).last_active:
+                topics[name] = other
+        topics.pop(Path(self._state(key).cwd).name, None)
+        return topics
+
+    def _list_agents(self, key: Key) -> str:
+        lines = []
+        for name, topic in self._agent_topics(key).items():
+            if topic is None:
+                status = "no topic yet: writing to it creates one"
+            elif (sess := self.sessions.get(topic)) and sess.busy:
+                status = "working"
+            elif self._should_hold(topic):
+                status = "asleep: waking it is up to the user"
+            else:
+                status = "available"
+            lines.append(f"{name}: {status}")
+        return "\n".join(lines) or "There are no other projects."
+
+    async def _send_to_agents(self, key: Key, to: list[str], text: str, on_wait) -> str:
+        names = list(dict.fromkeys(to))
+        topics = self._agent_topics(key)
+        unknown = [n for n in names if n not in topics]
+        if unknown or not names:
+            listed = ", ".join(unknown) or "(none given)"
+            raise ValueError(f"Not a project you can write to: {listed}. See list_agents.")
+        if not text.strip() or len(esc(text)) > AGENT_TEXT_LIMIT:
+            # Not cut to fit: what the user approves has to be all that goes.
+            raise ValueError(f"The message must have some text and fit in {AGENT_TEXT_LIMIT} characters.")
+        sender = Path(self._state(key).cwd).name
+        shown = ", ".join(esc(n) + ("" if topics[n] else " (new topic)") for n in names)
+        out = self._output(key)
+        await out.flush()
+        choice = await permissions.ask(
+            out, f"📨 <b>{esc(sender)} wants to write to:</b> {shown}\n<pre>{esc(text)}</pre>", on_wait
+        )
+        if choice != permissions.ALLOW:
+            return f"Nothing was sent: {permissions.OUTCOME[choice]}."
+        report = []
+        for name in names:
+            try:
+                report.append(f"{name}: {await self._deliver_to_agent(key, name, topics[name], sender, text)}")
+            except Exception as e:
+                log.exception("message to the agent of %s failed", name)
+                report.append(f"{name}: not sent ({e})")
+        return "\n".join(report)
+
+    async def _deliver_to_agent(self, key: Key, name: str, topic: Key | None, sender: str, text: str) -> str:
+        if topic is None:
+            created = await self.app.bot.create_forum_topic(key[0], name)
+            topic = (key[0], created.message_thread_id)
+            self._set_title(topic, name)
+            await self._set_cwd(topic, name)
+        # Posted first: it's what the user sees of it, and without it (a topic deleted since) nothing goes.
+        msg_id = await self._output(topic).send_html(f"📨 <b>From {esc(sender)}</b>\n{esc(text)}")
+        if msg_id is None:
+            return f"not sent: its topic doesn't take messages (deleted? the user can open a new one for {name})"
+        await self._submit(topic, AGENT_MESSAGE.format(sender=sender, text=text), [msg_id])
+        if any(item["ids"] == [msg_id] for item in self._state(topic).held):
+            return "held until the user decides (its conversation is asleep, or a limit stops it)"
+        return "delivered"
 
     def _should_hold(self, key: Key) -> bool:
         """A conversation asleep with its cache gone: where its next message goes is asked.
@@ -1371,6 +1453,8 @@ class Bot:
 
     async def _on_stranger(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         user, msg = update.effective_user, update.effective_message
+        if user and user.id == self.app.bot.id and msg and msg.forum_topic_created:
+            return  # a topic of ours, for a message to an agent: set up when it was created
         if user and user.id == self.app.bot.id and msg and msg.forum_topic_edited:
             # The service message for a rename of ours: the topic's name already says it all.
             try:

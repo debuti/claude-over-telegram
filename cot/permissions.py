@@ -94,6 +94,27 @@ def _keyboard(req_id: str, always: bool, plan: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([buttons])
 
 
+async def ask(
+    out: TelegramOutput, text: str, on_wait: Callable[[bool], None], always: bool = False, plan: bool = False
+) -> str:
+    """Show the request with its buttons and wait: ALLOW, ALWAYS, DENY, STOPPED or "expired"."""
+    req_id = secrets.token_hex(6)
+    future = asyncio.get_running_loop().create_future()
+    message_id = await out.send_html(text, reply_markup=_keyboard(req_id, always, plan))
+    PENDING[req_id] = Pending(out, future, message_id, text)
+    on_wait(True)
+    try:
+        choice = await asyncio.wait_for(future, TIMEOUT)
+    except asyncio.TimeoutError:
+        choice = "expired"
+        await _mark(out, PENDING.get(req_id), choice)
+    finally:
+        PENDING.pop(req_id, None)
+        on_wait(False)
+    log.info("permission %s: %s", req_id, choice)
+    return choice
+
+
 def make_can_use_tool(out: TelegramOutput, cwd, on_wait: Callable[[bool], None]):
     async def can_use_tool(tool: str, inp: dict[str, Any], ctx: ToolPermissionContext):
         if tool == "AskUserQuestion":
@@ -119,21 +140,8 @@ def make_can_use_tool(out: TelegramOutput, cwd, on_wait: Callable[[bool], None])
                 text += f"\n♾️ = always allow <code>{esc(rule)}</code>"
         text = text[:TG_LIMIT]
 
-        req_id = secrets.token_hex(6)
-        future = asyncio.get_running_loop().create_future()
-        message_id = await out.send_html(text, reply_markup=_keyboard(req_id, bool(updates), plan))
-        PENDING[req_id] = Pending(out, future, message_id, text)
-        on_wait(True)
-        try:
-            choice = await asyncio.wait_for(future, TIMEOUT)
-        except asyncio.TimeoutError:
-            choice = "expired"
-            await _mark(out, PENDING.get(req_id), choice)
-        finally:
-            PENDING.pop(req_id, None)
-            on_wait(False)
-
-        log.info("permission %s for %s: %s", req_id, tool, choice)
+        choice = await ask(out, text, on_wait, always=bool(updates), plan=plan)
+        log.info("%s: %s", tool, choice)
         if choice == ALLOW:
             return PermissionResultAllow()
         if choice == ALWAYS:

@@ -259,6 +259,19 @@ message. The Bot API caps downloads at 20 MB.
 Claude can send you files too (images show inline), through a `send_file`
 tool the bot gives it. Just ask: "send me the build log".
 
+## Agents writing to each other
+
+A conversation that finds something other projects' agents should do can write
+to them, through `list_agents` and `send_to_agents` tools the bot gives it. You
+get a button with the text and the recipients, in every permission mode; nothing
+goes without it, so agents can't chain messages or wake conversations unseen.
+
+Once approved, the message shows up in each project's topic as `📨 From <project>`
+and reaches its Claude marked as coming from another agent, not from you. A
+project without a topic gets one (in the same chat), and a sleeping conversation
+goes through the usual wake warning. Answers come back
+the same way, with their own button.
+
 ## Parallel conversations
 
 Each Telegram topic is an independent conversation, with its own Claude
