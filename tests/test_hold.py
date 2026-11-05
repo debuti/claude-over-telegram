@@ -118,6 +118,19 @@ async def test_hold_then_choose(bot):
     assert query.edited == ["prompt\n\n→ New"]
 
 
+async def test_edit_that_changed_nothing_is_not_sent_again(bot):
+    bot.hold, bot.texts = False, {}
+    bot._key = lambda update: KEY
+    bot._learn_title = lambda key, msg: None
+    msg = SimpleNamespace(chat_id=1, message_id=7, text="one")
+    await bot._on_text(SimpleNamespace(effective_message=msg, edited_message=None), None)
+    await bot._on_text(SimpleNamespace(effective_message=msg, edited_message=msg), None)
+    assert bot.delivered == ["one"]
+    msg.text = "two"  # a real correction still goes
+    await bot._on_text(SimpleNamespace(effective_message=msg, edited_message=msg), None)
+    assert bot.delivered == ["one", "two"]
+
+
 async def test_stale_nonce_does_nothing(bot):
     await bot._submit(KEY, "one")
     old_query, old_rest = tap(bot, "continue")

@@ -64,6 +64,9 @@ COMPACT_BUFFER = 33_000
 # A plan limit that doesn't say when it resets: seconds until the bot looks again.
 LIMIT_RETRY = 5 * 60
 
+# Texts of the latest messages, to tell an edit that changed nothing.
+KEEP_TEXTS = 500
+
 # What goes to Claude, ahead of any waiting messages, to carry on with a turn a limit cut short.
 CONTINUE_PROMPT = (
     "[From the Telegram bot: a plan limit cut your last turn short and has now lifted. "
@@ -89,6 +92,7 @@ class Bot:
         self.albums: dict[str, uploads.AlbumCollector] = {}
         # Messages sent to a topic before it has a folder; delivered once one is picked.
         self.no_folder: dict[Key, list[tuple[str, list[int]]]] = {}
+        self.texts: dict[tuple[int, int], str] = {}
         self.ttl = costguard.cache_ttl(cfg)
         # The cache alarm last sent per conversation: {"at": last_api_at it counts from, "step", "msg_id"}.
         self.alarms: dict[Key, dict] = {}
@@ -577,6 +581,15 @@ class Bot:
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
         self._learn_title(self._key(update), msg)
+        # Telegram can report an edit that changed nothing: it was sent already.
+        unchanged = update.edited_message and self.texts.get((msg.chat_id, msg.message_id)) == msg.text
+        if update.edited_message:
+            log.info("message %s edited (%s)", msg.message_id, "same text, ignored" if unchanged else "text changed")
+        if unchanged:
+            return
+        self.texts[msg.chat_id, msg.message_id] = msg.text
+        while len(self.texts) > KEEP_TEXTS:
+            del self.texts[next(iter(self.texts))]
         await self._submit(self._key(update), msg.text, [msg.message_id])
 
     async def _on_file(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
