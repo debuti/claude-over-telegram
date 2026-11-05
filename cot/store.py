@@ -35,6 +35,8 @@ class ConvState:
     limit_until: float = 0.0
     # A plan limit cut Claude's work short: when it lifts, whether Claude carries on is asked.
     limit_cut: bool = False
+    # Asked in advance to go on when a plan limit lifts, without asking again: "send" or "compact".
+    limit_auto: str = ""
     # The warning whose buttons are live: {"nonce", "msg_id", "kind"}; at most one per conversation.
     prompt: dict | None = None
 

@@ -502,6 +502,9 @@ class Session:
             # If it did, it's its work that has to go on.
             own = not self._keepalive and not self._compacting
             await self._limited(items if own and not self._worked else [], cut=own and self._worked)
+        elif self.state.limit_auto and not self._keepalive and not self._compacting:
+            self.state.limit_auto = ""  # it got through: a later limit asks again
+            self._on_state(self.state)
 
     async def _limited(self, turned_down: list[dict], cut: bool) -> None:
         """A plan limit stopped Claude: nothing queued can reach it, so the bot keeps it all."""

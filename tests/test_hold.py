@@ -249,7 +249,7 @@ async def test_limit_holds_messages_and_says_so_once(limit, tmp_path):
     await limit._submit(KEY, "one", [1])
     await limit._submit(KEY, "two", [2])
     assert limit.delivered == []
-    assert len(limit.out.notices) == 1 and "Plan limit reached" in limit.out.notices[0]
+    assert len(limit.out.sent) == 1 and "Plan limit reached" in limit.out.sent[0][0]
     saved = Store(tmp_path / "sessions.json").get(KEY)  # what a restart finds
     assert [m["text"] for m in saved.held] == ["one", "two"] and saved.limit_until > 0
 
@@ -259,20 +259,68 @@ async def test_limit_lifted_asks_then_sends_them_all(limit):
     await limit._submit(KEY, "two")
     state = limit.store.get(KEY)
     await limit._check_limit(KEY, state)
-    assert limit.out.sent == []  # still before the time it should end
+    assert len(limit.out.sent) == 1  # still before the time it should end
     state.limit_until = 1.0
     await limit._check_limit(KEY, state)
-    assert limit.out.sent == []  # past it, but the plan still says it's stopped
+    assert len(limit.out.sent) == 1  # past it, but the plan still says it's stopped
     limit.limit = False
     await limit._check_limit(KEY, state)
-    assert limit.delivered == [] and "Send 2 waiting messages" in limit.out.sent[0][0]
+    assert limit.delivered == [] and "Send 2 waiting messages" in limit.out.sent[1][0]
     assert state.limit_until == 0 and state.prompt["kind"] == "limit"
     await limit._submit(KEY, "three")  # waits for the same answer
     await limit._check_limit(KEY, state)
-    assert len(limit.out.sent) == 1
+    assert len(limit.out.sent) == 2
     query, rest = tap(limit, "send")
     await limit._on_guard(KEY, query, rest)
     assert limit.delivered == ["one", "two", "three"] and state.held == []
+
+
+@pytest.mark.parametrize("action", ["send", "compact"])
+async def test_limit_goes_on_by_itself_if_chosen_in_advance(limit, tmp_path, action):
+    await limit._submit(KEY, "one")
+    query, rest = tap(limit, action)
+    await limit._on_guard(KEY, query, rest)
+    assert limit.delivered == []  # not until it lifts
+    state = limit.store.get(KEY)
+    assert Store(tmp_path / "sessions.json").get(KEY).limit_auto == action
+    await limit._submit(KEY, "two")
+    state.limit_until = 1.0
+    await limit._check_limit(KEY, state)
+    assert limit.delivered == []  # the plan still says it's stopped
+    limit.limit, limit.hold = False, True  # a cold cache asks nothing: that was answered
+    await limit._check_limit(KEY, state)
+    prefix = "COMPACT " if action == "compact" else ""
+    assert limit.delivered == [prefix + "one", prefix + "two"]
+    assert state.held == [] and state.limit_until == 0 and state.prompt is None
+
+
+async def test_limit_chosen_in_advance_carries_on_with_the_cut_turn(limit):
+    await limit._on_limited(KEY, [], 1.0, cut=True)
+    query, rest = tap(limit, "send")
+    await limit._on_guard(KEY, query, rest)
+    limit.limit = False
+    state = limit.store.get(KEY)
+    await limit._check_limit(KEY, state)
+    assert limit.delivered == [CONTINUE_PROMPT] and not state.limit_cut
+
+
+async def test_limit_hit_again_keeps_the_choice_only_with_a_time_to_wait_for(limit):
+    state = limit.store.get(KEY)
+    state.limit_auto = "send"
+    await limit._on_limited(KEY, [], 1.0, cut=True)
+    assert state.limit_auto == "send" and "as you asked" in limit.out.notices[0]
+    state.limit_until = 0.0
+    await limit._on_limited(KEY, [], None, cut=True)
+    assert state.limit_auto == "" and state.prompt["kind"] == "schedule"
+
+
+async def test_stop_cancels_going_on_by_itself(limit, monkeypatch):
+    await limit._submit(KEY, "one")
+    query, rest = tap(limit, "send")
+    await limit._on_guard(KEY, query, rest)
+    monkeypatch.setattr(Bot, "_key", staticmethod(lambda u: KEY))
+    await limit._cmd_stop(SimpleNamespace(), None)
+    assert limit.store.get(KEY).limit_auto == "" and limit.store.get(KEY).held == []
 
 
 async def test_limit_lifted_drop(limit):
@@ -318,7 +366,7 @@ async def test_turned_down_messages_go_before_those_already_held(bot):
     state.held = [{"text": "later", "ids": []}]
     await bot._on_limited(KEY, [{"text": "first", "ids": []}], 2_000_000_000.0)
     assert [m["text"] for m in state.held] == ["first", "later"] and state.limit_until == 2_000_000_000.0
-    assert "resets in" in bot.out.notices[0]
+    assert "resets in" in bot.out.sent[0][0]
 
 
 async def test_limit_with_nothing_waiting_ends_silently(bot):
@@ -332,12 +380,12 @@ async def test_limit_with_nothing_waiting_ends_silently(bot):
 
 async def test_cut_turn_with_nothing_waiting_offers_to_continue(bot):
     await bot._on_limited(KEY, [], 2_000_000_000.0, cut=True)
-    assert "cut short" in bot.out.notices[0]
+    assert "cut short" in bot.out.sent[0][0]
     state = bot.store.get(KEY)
     state.limit_until = 1.0
     bot.hold = False
     await bot._check_limit(KEY, state)
-    text, markup = bot.out.sent[0]
+    text, markup = bot.out.sent[-1]
     assert "carry on" in text and state.limit_cut and state.limit_until == 0
     assert [b.text for row in markup.inline_keyboard for b in row] == ["▶️ Continue", "🗑 Leave it"]
     query, rest = tap(bot, "send")
@@ -351,7 +399,7 @@ async def test_continue_goes_ahead_of_the_waiting_messages_and_skips_the_triage(
     state.limit_until = 1.0
     bot.hold = True  # a cold cache: the choice is in this prompt, none comes after it
     await bot._check_limit(KEY, state)
-    assert "sending 1 waiting message too" in bot.out.sent[0][0]
+    assert "sending 1 waiting message too" in bot.out.sent[-1][0]
     query, rest = tap(bot, "send")
     await bot._on_guard(KEY, query, rest)
     assert bot.delivered == [CONTINUE_PROMPT, "one"] and state.prompt is None
@@ -362,7 +410,7 @@ async def test_cut_turn_with_a_big_cold_context_offers_to_compact(bot):
     state = bot.store.get(KEY)
     state.limit_until, state.context_tokens = 1.0, 180_000
     await bot._check_limit(KEY, state)
-    text, markup = bot.out.sent[0]
+    text, markup = bot.out.sent[-1]
     assert "180k tokens" in text and "🗜 Compact it and continue" in [b.text for r in markup.inline_keyboard for b in r]
     query, rest = tap(bot, "compact")
     await bot._on_guard(KEY, query, rest)

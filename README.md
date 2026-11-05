@@ -205,6 +205,9 @@ the limit lifts the bot asks for your OK and sends them all together (or drops t
 if the wait left the cache cold, the usual choice of where they go comes after it.
 If the limit cut Claude's work short, the same question offers to carry on with it
 (also with nothing waiting), first compacting if the cache went cold and you prefer.
+You can answer in advance: the buttons on the limit's notice make the bot go on by itself
+when it lifts, also through any further limit, until a turn gets through (a permission
+Claude asks for still waits for you).
 All this survives a restart too, and `/stop` drops it.
 
 Each topic's name shows how it stands, e.g. `⚙️·7️⃣·30m·web·📨2`: ⚙️ working, ❓ waiting for

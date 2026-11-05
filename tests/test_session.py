@@ -276,6 +276,18 @@ async def test_limit_hands_back_the_message_it_turned_down_and_the_queue():
     await sess.close()
 
 
+async def test_a_turn_that_gets_through_ends_going_on_by_itself():
+    sess = limited(make())
+    sess.state.limit_auto = "send"
+    FakeClient.scripts = [[limit_hit(), result(is_error=True)], [answer(), result()]]
+    await sess.send("one")
+    await until(lambda: sess.limits)
+    assert sess.state.limit_auto == "send"  # the limit hit again: the next reset goes on too
+    await sess.send("two")
+    await until(lambda: not sess.state.limit_auto)
+    await sess.close()
+
+
 async def test_limit_in_mid_turn_does_not_repeat_the_message_being_worked_on():
     sess = limited(make())
     FakeClient.scripts = [[answer(), INTERRUPT, limit_hit(), result(is_error=True)]]

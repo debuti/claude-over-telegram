@@ -328,6 +328,8 @@ class Bot:
         """A plan limit stops Claude: messages wait, in order, until _check_limit sees it gone."""
         state = self._state(key)
         state.held = items + state.held
+        if not resets and not state.limit_until:  # going on by itself hit it again, with no time to wait for
+            state.limit_auto = ""
         state.limit_until = max(state.limit_until, resets or 0.0) or time.time() + LIMIT_RETRY
         state.limit_cut = state.limit_cut or cut
         self.store.put(key, state)
@@ -337,10 +339,17 @@ class Bot:
         what = " and ".join((["Claude's work was cut short"] if state.limit_cut else []) + waiting)
         if items or cut:
             when = f", {usage.until(resets)}" if resets else ""
-            await self._output(key).notice(
-                f"⏸ Plan limit reached{when}. {what}; once it lifts I'll ask for your OK to go on. "
-                "/stop drops it."
-            )
+            text = f"⏸ Plan limit reached{when}. {what}"
+            if state.limit_auto:
+                await self._output(key).notice(f"{text}; once it lifts I'll go on, as you asked. /stop drops it.")
+                return
+            text += "; once it lifts I'll ask for your OK to go on, unless you choose now. /stop drops it."
+            rows = [[("⏰ Continue when it lifts", "send")]]
+            if state.context_tokens >= self.cfg.wake_small:
+                kilo = costguard.kilo(state.context_tokens)
+                text += f"\n\nIf its cache has expired by then, continuing re-sends {kilo} tokens."
+                rows.append([("🗜 Compact and continue when it lifts", "compact")])
+            await self._prompt(key, "schedule", text, rows)
 
     async def _check_limit(self, key: Key, state: ConvState) -> None:
         """Once the plan limit is gone, ask whether the messages that waited for it still go."""
@@ -348,10 +357,27 @@ class Bot:
         state = sess.state if sess else state
         if not state.limit_until or time.time() < state.limit_until or await self._blocked():
             return
+        if state.limit_auto and (state.held or state.limit_cut):
+            await self._go_on(key, state)
+            return
+        state.limit_auto = ""
         if (state.held or state.limit_cut) and not await self._prompt(key, "limit", *self._limit_prompt(key, state)):
             return  # looks again in a moment: going on takes the user's OK
         state.limit_until = 0.0
         self.store.put(key, state)
+
+    async def _go_on(self, key: Key, state: ConvState) -> None:
+        """The limit lifted and the user had already said what to do. limit_auto stays until a
+        turn gets through: if the limit hits again, the next reset goes on too."""
+        if state.limit_cut:
+            state.limit_cut = False
+            state.held.insert(0, {"text": CONTINUE_PROMPT, "ids": []})
+        state.limit_until = 0.0
+        self.store.put(key, state)
+        if state.limit_auto == "compact":
+            self._session(key).compact_next = True
+        await self._output(key).notice("✅ The plan limit has lifted: going on, as you asked")
+        await self._release(key)
 
     def _limit_prompt(self, key: Key, state: ConvState) -> tuple[str, list[list[tuple[str, str]]]]:
         """The question once the limit is gone. Going on with a cut turn stays in this conversation,
@@ -470,6 +496,10 @@ class Bot:
     async def _on_prompt(self, key: Key, kind: str, action: str) -> None:
         """A button of the live warning was tapped (its buttons are already gone)."""
         state = self._state(key)
+        if kind == "schedule":  # _check_limit acts on it once the limit lifts
+            state.limit_auto = action
+            self.store.put(key, state)
+            return
         if kind == "limit":
             if action == "drop":
                 state.held, state.limit_cut = [], False
@@ -869,7 +899,8 @@ class Bot:
             await sess.close()
         # A new directory means a new conversation; display preferences carry over.
         state = ConvState(cwd=str(path), mode=old.mode, model=old.model, tools=old.tools, title=old.title)
-        state.held, state.limit_until = old.held, old.limit_until  # the new conversation gets them
+        # The new conversation gets them.
+        state.held, state.limit_until, state.limit_auto = old.held, old.limit_until, old.limit_auto
         self.store.put(key, state)
         if old.prompt:
             try:
@@ -1044,6 +1075,7 @@ class Bot:
         running, dropped = await sess.stop() if sess else (False, 0)
         state = self._state(key)
         cut = state.limit_cut
+        state.limit_auto = ""
         if state.held or cut:  # held back by a warning, or waiting for a plan limit: dropped too
             dropped += len(state.held)
             state.held, state.limit_cut = [], False
@@ -1089,7 +1121,7 @@ class Bot:
         sess = self.sessions.get(key)
         state = sess.state if sess else self._state(key)
         if state.limit_until:
-            activity = "stopped by a plan limit"
+            activity = "stopped by a plan limit" + (", goes on when it lifts" if state.limit_auto else "")
         elif not sess or not sess.pending:
             activity = "idle"
         elif sess.waiting:
