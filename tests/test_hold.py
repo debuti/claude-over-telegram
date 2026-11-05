@@ -7,7 +7,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, RetryAfter
 
 from cot import bot as bot_mod
-from cot import triage
+from cot import login, triage, usage
 from cot.bot import CONTINUE_PROMPT, Bot
 from cot.store import ConvState, Store
 
@@ -66,7 +66,7 @@ def bot(tmp_path, monkeypatch):
     b.ttl = 3600
     b.store = Store(tmp_path / "sessions.json")
     b.store.put(KEY, ConvState(cwd=str(tmp_path), session_id="s1"))
-    b.sessions, b.no_folder, b.texts = {}, {}, {}
+    b.sessions, b.no_folder, b.texts, b.login = {}, {}, {}, None
     b.app = SimpleNamespace(bot=TgBot())
     b.out = Out()
     b.delivered = []
@@ -123,8 +123,8 @@ async def test_edit_that_changed_nothing_is_not_sent_again(bot):
     bot._key = lambda update: KEY
     bot._learn_title = lambda key, msg: None
     msg = SimpleNamespace(chat_id=1, message_id=7, text="one")
-    await bot._on_text(SimpleNamespace(effective_message=msg, edited_message=None), None)
-    await bot._on_text(SimpleNamespace(effective_message=msg, edited_message=msg), None)
+    await bot._on_text(SimpleNamespace(effective_message=msg, edited_message=None, message=msg), None)
+    await bot._on_text(SimpleNamespace(effective_message=msg, edited_message=msg, message=None), None)
     assert bot.delivered == ["one"]
     msg.text = "two"  # a real correction still goes
     await bot._on_text(SimpleNamespace(effective_message=msg, edited_message=msg), None)
@@ -332,6 +332,59 @@ async def test_stop_cancels_going_on_by_itself(limit, monkeypatch):
     monkeypatch.setattr(Bot, "_key", staticmethod(lambda u: KEY))
     await limit._cmd_stop(SimpleNamespace(), None)
     assert limit.store.get(KEY).limit_auto == "" and limit.store.get(KEY).held == []
+
+
+async def test_lost_login_holds_messages_until_it_is_back(bot, monkeypatch):
+    bot.hold = False
+    back = []
+    monkeypatch.setattr(usage, "renewed_since", lambda when: bool(back))
+    await bot._on_login_lost(KEY, [{"text": "one", "ids": [1]}], False)
+    await bot._submit(KEY, "two", [2])
+    assert len(bot.out.notices) == 1 and "/login" in bot.out.notices[0] and "1 message waiting" in bot.out.notices[0]
+    state = bot.store.get(KEY)
+    await bot._check_login(KEY, state)
+    assert bot.delivered == [] and [m["text"] for m in state.held] == ["one", "two"]
+    await bot._on_login_lost(KEY, [], False)  # a keep-alive finding out too: said once
+    assert len(bot.out.notices) == 1
+    back.append(True)
+    await bot._check_login(KEY, state)
+    assert bot.delivered == ["one", "two"] and state.login_lost_at == 0 and state.held == []
+
+
+async def test_lost_login_that_cut_a_turn_carries_on_with_it(bot, monkeypatch):
+    bot.hold = False
+    monkeypatch.setattr(usage, "renewed_since", lambda when: True)
+    await bot._on_login_lost(KEY, [], True)
+    assert "cut short" in bot.out.notices[0] and "waiting" not in bot.out.notices[0]
+    await bot._check_login(KEY, bot.store.get(KEY))
+    assert bot.delivered == [bot_mod.LOGIN_CONTINUE_PROMPT]
+
+
+async def test_code_goes_to_the_login_and_not_to_claude(bot):
+    bot.hold = False
+    bot._key = lambda update: KEY
+    bot._learn_title = lambda key, msg: None
+    done = []
+
+    class FakeLogin:
+        key, waiting = KEY, True
+
+        async def finish(self, code):
+            done.append(code)
+
+    bot.login = FakeLogin()
+
+    async def send(text):
+        msg = SimpleNamespace(chat_id=1, message_id=len(text), text=text)
+        await bot._on_text(SimpleNamespace(effective_message=msg, edited_message=None, message=msg), None)
+
+    await send("not a code at all")
+    await send("abcdefghijklmnopqrstuvwxyz#123")
+    assert bot.delivered == ["not a code at all"] and done == ["abcdefghijklmnopqrstuvwxyz#123"]
+    assert "Logged in" in bot.out.notices[-1]
+    bot.login = login.Login("claude", KEY)  # nothing running any more: a message like any other
+    await send("abcdefghijklmnopqrstuvwxyz#456")
+    assert bot.delivered[-1] == "abcdefghijklmnopqrstuvwxyz#456"
 
 
 async def test_limit_lifted_drop(limit):

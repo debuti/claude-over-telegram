@@ -7,7 +7,7 @@ from cot import session as session_mod
 from cot.session import Session
 from cot.store import ConvState
 
-from .fakes import INTERRUPT, FakeClient, FakeOutput, answer, limit_event, limit_hit, result
+from .fakes import INTERRUPT, FakeClient, FakeOutput, answer, compact_failed, limit_event, limit_hit, login_lost, result
 
 
 @pytest.fixture(autouse=True)
@@ -273,6 +273,62 @@ async def test_limit_hands_back_the_message_it_turned_down_and_the_queue():
     assert sess.out.notices == [] and sess.out.texts == ["You've hit your session limit · resets 6pm (UTC)"]
     await asyncio.sleep(0.05)
     assert FakeClient.queries == ["one"]  # nothing goes on trying
+    await sess.close()
+
+
+def without_login(sess):
+    sess.lost = []
+
+    async def on_login_lost(items, cut):
+        sess.lost.append(([item["text"] for item in items], cut))
+
+    sess.on_login_lost = on_login_lost
+    return sess
+
+
+async def test_lost_login_hands_back_the_message_and_the_queue():
+    sess = without_login(make())
+    FakeClient.scripts = [[INTERRUPT, login_lost(), result(is_error=True)]]
+    await sess.send("one")
+    await until(lambda: FakeClient.queries == ["one"])
+    await sess.send("two")
+    await sess._client.interrupt()
+    await until(lambda: sess.lost)
+    assert sess.lost == [(["one", "two"], False)]
+    assert sess.state.pending == [] and sess.queued == 0 and sess.out.notices == []
+    await asyncio.sleep(0.05)
+    assert FakeClient.queries == ["one"]
+    await sess.close()
+
+
+async def test_lost_login_in_mid_turn_counts_as_cut_short():
+    sess = without_login(make())
+    FakeClient.scripts = [[answer(), login_lost(), result(is_error=True)]]
+    await sess.send("one")
+    await until(lambda: sess.lost)
+    assert sess.lost == [([], True)]
+    await sess.close()
+
+
+async def test_compaction_stopped_by_the_login_keeps_the_message_and_the_context():
+    sess = without_login(make(compact_at=100))
+    sess.state.context_tokens = 500
+    FakeClient.scripts = [[compact_failed(), result()]]
+    await sess.send("one")
+    await until(lambda: sess.lost)
+    assert sess.lost == [(["one"], False)]
+    assert FakeClient.queries == ["/compact"]
+    assert sess.compact_next and sess.state.context_tokens == 500
+    await sess.close()
+
+
+async def test_compaction_that_failed_otherwise_keeps_the_context():
+    sess = make(compact_at=100)
+    sess.state.context_tokens = 500
+    FakeClient.scripts = [[compact_failed("not enough messages"), result()], [answer(), result()]]
+    await sess.send("one")
+    await until(lambda: FakeClient.queries == ["/compact", "one"])
+    assert not sess._measure_compacted
     await sess.close()
 
 

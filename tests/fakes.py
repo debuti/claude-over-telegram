@@ -24,6 +24,18 @@ def limit_hit():
                             usage=usage, error="rate_limit")
 
 
+def login_lost():
+    """What the CLI answers when its login has gone."""
+    usage = {"input_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0}
+    return AssistantMessage([TextBlock("Failed to authenticate: OAuth session expired")], "<synthetic>",
+                            usage=usage, error="authentication_failed")
+
+
+def compact_failed(why="Failed to authenticate: expired"):
+    """A /compact that failed: not an error for the CLI."""
+    return AssistantMessage([TextBlock(f"Error during compaction: {why}")], "<synthetic>")
+
+
 def result(is_error=False, terminal_reason=None, cost=0.01):
     return ResultMessage(
         subtype="error_during_execution" if is_error else "success",

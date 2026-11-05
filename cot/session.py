@@ -190,6 +190,7 @@ class Session:
         # A plan limit stopped Claude: the messages it didn't get to, when it resets (if known)
         # and whether it cut Claude's work short.
         self.on_limited: Callable[[list[dict], float | None, bool], Awaitable[None]] | None = None
+        self.on_login_lost: Callable[[list[dict], bool], Awaitable[None]] | None = None
         self._client: ClaudeSDKClient | None = None
         self._task: asyncio.Task | None = None
         self.busy = False
@@ -201,6 +202,7 @@ class Session:
         self._turn_done: asyncio.Future | None = None  # the user's turn, until its result
         self._last_activity = time.monotonic()
         self._tasks: set[str] = set()  # background tasks still running
+        self._login_lost = self._compact_error = False  # what the last turn hit
         self._turn_ok = False  # the last turn ended without an error or being stopped
         self._logging: set[asyncio.Task] = set()
         self._fresh = False  # no turn yet in this Claude process
@@ -486,7 +488,7 @@ class Session:
         self._keepalive = not real
         items = real or items[:1]
         self._turn_done = asyncio.get_running_loop().create_future()
-        self._limit_hit = self._worked = False
+        self._limit_hit = self._login_lost = self._compact_error = self._worked = False
         if not self._keepalive:  # keep-alives don't count as use: they stop some hours after it
             self.state.last_active = time.time()
         self._begin_turn()
@@ -502,6 +504,9 @@ class Session:
             # If it did, it's its work that has to go on.
             own = not self._keepalive and not self._compacting
             await self._limited(items if own and not self._worked else [], cut=own and self._worked)
+        elif self._login_lost:
+            own = not self._keepalive and not self._compacting
+            await self._without_login(items if own and not self._worked else [], cut=own and self._worked)
         elif self.state.limit_auto and not self._keepalive and not self._compacting:
             self.state.limit_auto = ""  # it got through: a later limit asks again
             self._on_state(self.state)
@@ -514,15 +519,31 @@ class Session:
             self.compact_next = True
         if not self.on_limited:
             return
+        try:
+            await self.on_limited(self._take_back(turned_down), resets, cut)
+        except Exception:
+            log.exception("could not report the plan limit")
+
+    async def _without_login(self, turned_down: list[dict], cut: bool) -> None:
+        """Claude's login has gone, and no message can reach it until it's back: the bot keeps them."""
+        self._login_lost = False
+        if self._compacting:  # still wanted once Claude can run again
+            self.compact_next = True
+        if not self.on_login_lost:
+            return
+        try:
+            await self.on_login_lost(self._take_back(turned_down), cut)
+        except Exception:
+            log.exception("could not report the lost login")
+
+    def _take_back(self, turned_down: list[dict]) -> list[dict]:
+        """All that was going to Claude, out of the session, in order."""
         items, self.state.pending = turned_down + self.state.pending, []
         self._handed_back = True
         self._gathered.clear()
         while not self._queue.empty():
             self._queue.get_nowait()
-        try:
-            await self.on_limited(items, resets, cut)
-        except Exception:
-            log.exception("could not report the plan limit")
+        return items
 
     def _begin_turn(self) -> None:
         """Note how the cache should stand, to check against what the turn's first call reports."""
@@ -584,6 +605,8 @@ class Session:
                     elif self._turn_done is None:
                         if self._limit_hit:
                             await self._limited([], cut=True)
+                        elif self._login_lost:
+                            await self._without_login([], cut=True)
                         self.busy = False
                         self._stopping = False
             raise ConnectionError("Claude stopped")
@@ -620,11 +643,24 @@ class Session:
         self._measure_compacted = True  # the next answer tells how much it left
         await self.out.notice(f"🗜 Claude compacted the conversation ({size // 1000}k tokens of context) to go on")
 
+    def _compact_failed(self, msg: AssistantMessage) -> bool:
+        """A failed /compact doesn't end as an error; all that tells is what it says."""
+        said = " ".join(block.text for block in msg.content if isinstance(block, TextBlock))
+        if "Error during compaction" not in said:
+            return False
+        self._compact_error = True
+        self._login_lost = self._login_lost or "authenticate" in said
+        return True
+
     async def _handle(self, msg) -> None:
         if isinstance(msg, AssistantMessage):
             nested = msg.parent_tool_use_id is not None
             if not nested and msg.error == "rate_limit":
                 self._limit_hit = True
+            elif not nested and msg.error == "authentication_failed":
+                self._login_lost = True
+            elif not nested and self._compacting and self._compact_failed(msg):
+                pass
             elif not nested:
                 self._worked = True
             if not nested and msg.usage and not msg.error:  # an error's are all 0: no call was made
@@ -682,9 +718,10 @@ class Session:
                 self._logging.add(task)
                 task.add_done_callback(self._logging.discard)
             stopped = self._stopping or (msg.terminal_reason or "").startswith("aborted")
-            self._turn_ok = not stopped and not msg.is_error and not self._limit_hit
+            hit = self._limit_hit or self._login_lost
+            self._turn_ok = not stopped and not msg.is_error and not hit and not self._compact_error
             if stopped:
                 await self.out.notice("🛑 Stopped")
-            elif msg.is_error and not self._limit_hit:  # Claude has said which limit, and until when
+            elif msg.is_error and not hit:  # Claude has said which limit, and until when
                 detail = "; ".join(msg.errors or []) or msg.subtype
                 await self.out.notice(f"⚠️ Claude ended with an error: {detail}")

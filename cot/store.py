@@ -37,6 +37,8 @@ class ConvState:
     limit_cut: bool = False
     # Asked in advance to go on when a plan limit lifts, without asking again: "send" or "compact".
     limit_auto: str = ""
+    # When Claude's login was found gone, while held messages wait for it to come back; else 0.
+    login_lost_at: float = 0.0
     # The warning whose buttons are live: {"nonce", "msg_id", "kind"}; at most one per conversation.
     prompt: dict | None = None
 

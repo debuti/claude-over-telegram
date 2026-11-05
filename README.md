@@ -210,8 +210,12 @@ when it lifts, also through any further limit, until a turn gets through (a perm
 Claude asks for still waits for you).
 All this survives a restart too, and `/stop` drops it.
 
+If Claude's login expires and can't be refreshed, it's the same: nothing reaches Claude and
+nothing is lost. `/login` renews it from Telegram (open the address it gives, send back the
+code that page shows), and what waited goes on by itself; so it does after a login on the machine.
+
 Each topic's name shows how it stands, e.g. `⚙️·7️⃣·30m·web·📨2`: ⚙️ working, ❓ waiting for
-your permission, ⏸ stopped by a plan limit, 🟢 awake and waiting for you or 💤 asleep; tenths of the room left
+your permission, 🔑 waiting for `/login`, ⏸ stopped by a plan limit, 🟢 awake and waiting for you or 💤 asleep; tenths of the room left
 until it compacts, `7️⃣` being 70%; time until the prompt cache is really lost, counting the keep-alives
 that conversation will get (none below `WAKE_SMALL_TOKENS` or during a plan limit), in steps, or
 🧊 once gone; its name; and messages waiting. It changes at most every 15 seconds, and the
@@ -235,6 +239,7 @@ turns it off.
 | `/status`  | Workdir, mode, model, activity, context usage        |
 | `/cost`    | Estimated cost of the conversation                   |
 | `/usage`   | Plan usage: 5-hour and weekly limits                 |
+| `/login`   | Renew Claude's login from Telegram                   |
 | `/server`  | Machine health: load, CPU, memory, disk, busiest processes |
 | `/…`       | Anything else is passed to Claude (e.g. `/compact`)  |
 
@@ -397,7 +402,8 @@ systemctl --user restart claude-over-telegram   # or ./stop.sh && ./run.sh …
   means that id is missing from `ALLOWED_USER_IDS`.
 - **`409 Conflict` / "another instance is already running".** Only one copy can
   poll a bot token. Stop the other one (`./stop.sh`, or the service).
-- **Claude says it is not logged in.** Run `claude` on the machine and `/login`.
+- **Claude says it is not logged in.** Send `/login` to the bot, or run `claude` on the
+  machine and `/login` there.
 - **`/usage`: "login expired".** The token is refreshed whenever Claude runs;
   send any message and try again.
 - **Commands work in the terminal but not through the bot.** The service has a
@@ -418,6 +424,7 @@ Issues and pull requests are welcome. The code is small:
 | `cot/permissions.py` | Permission prompts as buttons                              |
 | `cot/jail.py`        | Hook that keeps file writes inside the working folder     |
 | `cot/usage.py`       | Plan usage for `/usage`                                    |
+| `cot/login.py`       | Claude's login from Telegram, for `/login`                 |
 | `cot/usagelog.py`    | Per-turn log of cost and plan usage (`state/usage.jsonl`) |
 | `cot/costguard.py`   | What the next message costs: cache TTL, cold/warm estimates |
 | `cot/triage.py`      | Haiku decides where a message to a cold conversation goes |

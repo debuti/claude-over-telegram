@@ -23,13 +23,26 @@ class Unavailable(Exception):
     pass
 
 
+def _credentials() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / ".credentials.json"
+
+
 def _login() -> dict:
     """OAuth login of Claude Code on this machine (the CLI refreshes it)."""
-    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     try:
-        return json.loads((config_dir / ".credentials.json").read_text())["claudeAiOauth"]
+        return json.loads(_credentials().read_text())["claudeAiOauth"]
     except (OSError, ValueError, KeyError):
         raise Unavailable("no Claude subscription login found (API keys have no plan limits)") from None
+
+
+def renewed_since(when: float) -> bool:
+    """Whether there is a good login written after that moment (a failed refresh can write one without a token)."""
+    try:
+        login = _login()
+        return bool(_credentials().stat().st_mtime > when and login.get("accessToken")
+                    and login.get("expiresAt", 0) / 1000 > time.time())
+    except (OSError, Unavailable):
+        return False
 
 
 async def _refresh(cli: str) -> None:

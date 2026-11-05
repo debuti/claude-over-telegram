@@ -18,7 +18,20 @@ from telegram.ext import (
     filters,
 )
 
-from . import __version__, container, costguard, history, permissions, server, titles, triage, uploads, usage, usagelog
+from . import (
+    __version__,
+    container,
+    costguard,
+    history,
+    login,
+    permissions,
+    server,
+    titles,
+    triage,
+    uploads,
+    usage,
+    usagelog,
+)
 from .config import Config
 from .output import TelegramOutput
 from .render import esc
@@ -54,6 +67,7 @@ COMMANDS = [
     ("status", "what's going on"),
     ("cost", "estimated cost of this conversation"),
     ("usage", "plan usage limits (5-hour and weekly)"),
+    ("login", "renew Claude's login from here"),
     ("server", "load of the machine the bot runs on"),
 ]
 
@@ -63,6 +77,12 @@ COMPACT_BUFFER = 33_000
 
 # A plan limit that doesn't say when it resets: seconds until the bot looks again.
 LIMIT_RETRY = 5 * 60
+
+# What goes to Claude, ahead of any waiting messages, to carry on with a turn a lost login cut short.
+LOGIN_CONTINUE_PROMPT = (
+    "[From the Telegram bot: your login expired in the middle of your last turn and has now been renewed. "
+    "Carry on with what you were doing.]"
+)
 
 # Texts of the latest messages, to tell an edit that changed nothing.
 KEEP_TEXTS = 500
@@ -93,6 +113,7 @@ class Bot:
         # Messages sent to a topic before it has a folder; delivered once one is picked.
         self.no_folder: dict[Key, list[tuple[str, list[int]]]] = {}
         self.texts: dict[tuple[int, int], str] = {}
+        self.login: login.Login | None = None
         self.ttl = costguard.cache_ttl(cfg)
         # The cache alarm last sent per conversation: {"at": last_api_at it counts from, "step", "msg_id"}.
         self.alarms: dict[Key, dict] = {}
@@ -134,6 +155,7 @@ class Bot:
         self.app.add_handler(CommandHandler("status", self._cmd_status, filters=allowed))
         self.app.add_handler(CommandHandler("cost", self._cmd_cost, filters=allowed))
         self.app.add_handler(CommandHandler("usage", self._cmd_usage, filters=allowed))
+        self.app.add_handler(CommandHandler("login", self._cmd_login, filters=allowed))
         self.app.add_handler(CommandHandler("server", self._cmd_server, filters=allowed))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
         # Unknown /commands fall through to here and reach Claude (e.g. /compact).
@@ -245,6 +267,8 @@ class Bot:
         sess.on_turn_end = lambda entry: self._log_turn(key, sess, entry)
         sess.on_turn_failed = lambda: self.usage_log.turn_failed(key)
         sess.on_limited = lambda items, resets, cut: self._on_limited(key, items, resets, cut)
+        if not self.cfg.api_key:  # a wrong API key won't come back on its own: its error says so
+            sess.on_login_lost = lambda items, cut: self._on_login_lost(key, items, cut)
         sess.start()
         self.sessions[key] = sess
         if state.pending:
@@ -303,7 +327,7 @@ class Bot:
         self._remember(key, text, ids)
         state = self._state(key)
         # A warning or a plan limit is already holding some, or asking about the cut turn: this one waits too.
-        if state.held or (state.limit_cut and not state.limit_until):
+        if state.held or state.login_lost_at or (state.limit_cut and not state.limit_until):
             state.held.append({"text": text, "ids": ids or []})
             self.store.put(key, state)
             return
@@ -357,6 +381,36 @@ class Bot:
                 text += f"\n\nIf its cache has expired by then, continuing re-sends {kilo} tokens."
                 rows.append([("🗜 Compact and continue when it lifts", "compact")])
             await self._prompt(key, "schedule", text, rows)
+
+    async def _on_login_lost(self, key: Key, items: list[dict], cut: bool) -> None:
+        """Claude's login is gone: messages wait, in order, until _check_login sees it back."""
+        state = self._state(key)
+        first = not state.login_lost_at
+        state.held = items + state.held
+        if cut and LOGIN_CONTINUE_PROMPT not in (m["text"] for m in state.held):
+            state.held.insert(0, {"text": LOGIN_CONTINUE_PROMPT, "ids": []})
+        state.login_lost_at = time.time()
+        self.store.put(key, state)
+        if first:
+            n = len(state.held) - cut
+            waiting = f" {n} message{'s' * (n > 1)} waiting." if n else ""
+            work = " Claude's work was cut short." if cut else ""
+            await self._output(key).notice(
+                f"🔑 Claude's login has expired.{work}{waiting} Send /login to renew it from here; "
+                "all this goes on by itself once it's back. /stop drops it."
+            )
+
+    async def _check_login(self, key: Key, state: ConvState) -> None:
+        """Once Claude has a login again (from /login or on the machine), what waited for it goes."""
+        sess = self.sessions.get(key)
+        state = sess.state if sess else state
+        if not state.login_lost_at or not usage.renewed_since(state.login_lost_at):
+            return
+        state.login_lost_at = 0.0
+        self.store.put(key, state)
+        if state.held:
+            await self._output(key).notice("🔑 Claude's login is back: going on")
+            await self._release(key)
 
     async def _check_limit(self, key: Key, state: ConvState) -> None:
         """Once the plan limit is gone, ask whether the messages that waited for it still go."""
@@ -618,6 +672,10 @@ class Bot:
     async def _on_text(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
         self._learn_title(self._key(update), msg)
+        if self.login and self.login.key == self._key(update) and self.login.waiting:
+            if update.message and login.CODE.fullmatch(msg.text.strip()):
+                await self._finish_login(self._key(update), msg.text.strip())
+                return
         # Telegram can report an edit that changed nothing (seemingly on reacting to a message
         # that has been waiting a while, not confirmed): it was sent already.
         unchanged = update.edited_message and self.texts.get((msg.chat_id, msg.message_id)) == msg.text
@@ -678,7 +736,7 @@ class Bot:
                 await self._backfill(key, state)
             # Held for a plan limit, they go on waiting for it or for the answer to its prompt.
             limit = state.limit_until or (state.prompt and state.prompt["kind"] == "limit")
-            if state.held and self._assigned(key) and not limit:
+            if state.held and self._assigned(key) and not limit and not state.login_lost_at:
                 await self._ask_hold(key)
         self._alarm_task = asyncio.create_task(self._alarm_loop())
 
@@ -687,19 +745,22 @@ class Bot:
             await asyncio.sleep(15)
             for key, state in self.store.items():
                 try:
+                    await self._check_login(key, state)
                     await self._check_limit(key, state)
                     if self.cfg.topic_titles:
                         await self._check_title(key, state)
                     if self.cfg.cache_alarms or self.cfg.keepalive > self.ttl:
                         await self._check_alarm(key, state)
                 except Exception:
-                    log.exception("plan limit check, cache alarm or keep-alive failed")
+                    log.exception("login or plan limit check, cache alarm or keep-alive failed")
 
     def _title(self, key: Key, state: ConvState) -> str:
         """The topic's name as it should stand now."""
         sess = self.sessions.get(key)
         if sess and sess.waiting:  # first: it's the one that needs the user
             status = titles.ASKING
+        elif state.login_lost_at:
+            status = titles.LOGIN
         elif state.limit_until or state.limit_cut:
             status = titles.LIMITED
         elif sess and sess.pending:
@@ -721,6 +782,7 @@ class Bot:
         data = self._plan[1]
         if (
             not state.session_id
+            or state.login_lost_at
             or state.limit_until
             or state.limit_cut
             or state.context_tokens < self.cfg.wake_small
@@ -760,7 +822,7 @@ class Bot:
             alarm = None
         if not state.session_id or not state.last_api_at or (sess and sess.pending) or not self._assigned(key):
             return
-        if state.limit_until or state.limit_cut:
+        if state.login_lost_at or state.limit_until or state.limit_cut:
             return
         now = time.time()
         left = costguard.cache_left(now, state.last_api_at, self.ttl)
@@ -908,6 +970,7 @@ class Bot:
         state = ConvState(cwd=str(path), mode=old.mode, model=old.model, tools=old.tools, title=old.title)
         # The new conversation gets them.
         state.held, state.limit_until, state.limit_auto = old.held, old.limit_until, old.limit_auto
+        state.login_lost_at = old.login_lost_at
         self.store.put(key, state)
         if old.prompt:
             try:
@@ -1082,7 +1145,7 @@ class Bot:
         running, dropped = await sess.stop() if sess else (False, 0)
         state = self._state(key)
         cut = state.limit_cut
-        state.limit_auto = ""
+        state.limit_auto, state.login_lost_at = "", 0.0  # with nothing waiting, the next message finds out
         if state.held or cut:  # held back by a warning, or waiting for a plan limit: dropped too
             dropped += len(state.held)
             state.held, state.limit_cut = [], False
@@ -1127,7 +1190,9 @@ class Bot:
         key = self._key(update)
         sess = self.sessions.get(key)
         state = sess.state if sess else self._state(key)
-        if state.limit_until:
+        if state.login_lost_at:
+            activity = "waiting for /login"
+        elif state.limit_until:
             activity = "stopped by a plan limit" + (", goes on when it lifts" if state.limit_auto else "")
         elif not sess or not sess.pending:
             activity = "idle"
@@ -1164,6 +1229,32 @@ class Bot:
             f"💰 This conversation: ${state.cost_usd:.4f}{last}\n"
             "API-price estimate; on a Claude subscription it counts against your plan limits instead."
         )
+
+    async def _cmd_login(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        key = self._key(update)
+        if self.cfg.api_key:
+            await self._output(key).notice("⚠️ This bot uses an API key, not a Claude login.")
+            return
+        if self.login:
+            self.login.close()
+        self.login = login.Login(self.cfg.cli_path or container.bundled_cli(), key)
+        try:
+            url = await self.login.start()
+        except (OSError, login.LoginError) as e:
+            await self._output(key).notice(f"⚠️ Could not start the login: {e}")
+            return
+        await self._output(key).send_html(
+            f'🔑 <a href="{esc(url)}">Sign in to Claude here</a>, then send me the code the page shows '
+            "(in this topic, within 10 minutes). It goes to the login, not to Claude."
+        )
+
+    async def _finish_login(self, key: Key, code: str) -> None:
+        try:
+            await self.login.finish(code)
+        except login.LoginError as e:
+            await self._output(key).notice(f"⚠️ The login failed: {e}. /login tries again.")
+            return
+        await self._output(key).notice("✅ Logged in to Claude. What was waiting for it goes in a moment.")
 
     async def _cmd_usage(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await self._output(self._key(update)).notice(await self._usage_text())
