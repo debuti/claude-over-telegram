@@ -415,7 +415,11 @@ class Session:
                 if self._alive() and self._compacts_asleep():
                     self.busy = True
                     try:
-                        # Without a word: even a silent message would count as unread.
+                        size = self.state.context_tokens
+                        await self.out.note(
+                            f"🗜 Compacting the conversation ({size // 1000}k tokens of context) "
+                            "before it goes to sleep…"
+                        )
                         await self._compact()
                     except Exception:
                         log.exception("compaction before sleeping failed")

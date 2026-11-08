@@ -39,6 +39,7 @@ class TelegramOutput:
         self._last_edit = 0.0
         self._flush_task: asyncio.Task | None = None
         self._flush_lock = asyncio.Lock()
+        self._last: tuple[int, str] | None = None  # the latest message note() can add to
 
     # --- low level --------------------------------------------------------
 
@@ -86,6 +87,8 @@ class TelegramOutput:
         except TelegramError:
             log.exception("send failed")
             return None
+        if not reply_markup:  # those with buttons get edited by whoever handles the button
+            self._last = (msg.message_id, text)
         return msg.message_id
 
     async def send_file(self, name: str, content: str, caption: str = "") -> None:
@@ -148,6 +151,8 @@ class TelegramOutput:
                     log.warning("activity edit failed: %s", e)
             except TelegramError:
                 log.exception("activity edit failed")
+            if self._last and self._last[0] == self._activity_id:
+                self._last = (self._activity_id, text)
         self._shown = text
 
     async def _delayed_flush(self, delay: float) -> None:
@@ -210,6 +215,31 @@ class TelegramOutput:
         """A short plain-text status line from the bot itself."""
         await self._close_activity()
         await self.send_html(esc(text))
+
+    async def note(self, text: str) -> None:
+        """A status line that doesn't sound or leave the chat unread, as any new message would,
+        even a silent one: it goes at the end of the latest message. With none to add to, or
+        no room in it, it doesn't show."""
+        await self._close_activity()
+        if not self._last:
+            return
+        msg_id, html = self._last
+        html = f"{html}\n\n{esc(text)}"
+        if len(html) > TG_LIMIT:
+            return
+        try:
+            await self._call(
+                self.bot.edit_message_text,
+                html,
+                chat_id=self.chat_id,
+                message_id=msg_id,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except TelegramError as e:  # deleted meanwhile, say
+            log.warning("note failed: %s", e)
+            return
+        self._last = (msg_id, html)
 
     async def end_turn(self) -> None:
         await self._close_activity()

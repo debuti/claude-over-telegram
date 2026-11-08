@@ -432,7 +432,8 @@ async def test_compacts_before_sleeping_only_big_and_warm(monkeypatch, context, 
     await until(lambda: sess.entries and not sess.connected)
     assert FakeClient.queries == (["hi", "/compact"] if compacts else ["hi"])
     assert sess.state.context_tokens == (0 if compacts else context + 5)
-    assert sess.out.notices == []  # nothing to leave unread in the chat
+    assert sess.out.notices == []  # no new message to leave the chat unread
+    assert len(sess.out.notes) == compacts and all("before it goes to sleep" in n for n in sess.out.notes)
     await sess.close()
 
 

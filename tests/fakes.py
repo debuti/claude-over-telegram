@@ -94,10 +94,14 @@ class FakeOutput:
 
     def __init__(self):
         self.notices: list[str] = []
+        self.notes: list[str] = []
         self.texts: list[str] = []
 
     async def notice(self, text):
         self.notices.append(text)
+
+    async def note(self, text):
+        self.notes.append(text)
 
     async def text(self, md):
         self.texts.append(md)
