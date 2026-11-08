@@ -969,7 +969,8 @@ class Bot:
         room = ""
         if self.cfg.compact_at:  # the same size Session._needs_compact goes by
             room = titles.room(state.context_tokens, max(self.cfg.compact_at, 2 * state.after_compact))
-        cache = titles.cache(self._cache_lasts(state)) if state.last_api_at else ""
+        # Just compacted, the old context's cache is no use: until the next answer there's none to lose.
+        cache = titles.cache(self._cache_lasts(state)) if state.last_api_at and state.context_tokens else ""
         queued = (sess.queued if sess else len(state.pending)) + len(state.held)
         return titles.compose(state.title, status, room, cache, queued)
 

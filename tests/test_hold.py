@@ -581,6 +581,14 @@ async def test_topic_name_counts_the_keep_alives_this_conversation_gets(topic, t
     assert bot.app.bot.renames == [shown]
 
 
+async def test_topic_name_shows_no_cache_just_after_compacting(topic):
+    bot, state = topic
+    state.last_api_at = bot_mod.time.time() - 600
+    state.context_tokens = 0
+    await bot._check_title(TOPIC, state)
+    assert bot.app.bot.renames == ["💤·🔟·web"]
+
+
 async def test_topic_name_when_awake_and_idle(topic):
     bot, state = topic
     bot.sessions[TOPIC] = SimpleNamespace(state=state, waiting=False, pending=False, connected=True, queued=0)

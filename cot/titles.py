@@ -17,7 +17,8 @@ LEGEND = (
     f"{LIMITED} stopped by a plan limit, "
     f"{IDLE} awake, waiting for you, {ASLEEP} asleep\n"
     f"{KEYCAPS[0]}…{KEYCAPS[10]} room left until it compacts: 7️⃣ is 70%\n"
-    f"30m until the prompt cache is lost, at least, keep-alives included; {COLD} gone: the next message re-sends all\n"
+    f"30m until the prompt cache is lost, at least, keep-alives included; {COLD} gone: the next message re-sends all; "
+    "neither just after compacting: there's nothing to lose\n"
     "web the topic's name\n"
     f"{QUEUED}2 messages waiting for Claude"
 )
