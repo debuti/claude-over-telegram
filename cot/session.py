@@ -415,7 +415,8 @@ class Session:
                 if self._alive() and self._compacts_asleep():
                     self.busy = True
                     try:
-                        await self._compact("before it goes to sleep")
+                        # Without a word: even a silent message would count as unread.
+                        await self._compact()
                     except Exception:
                         log.exception("compaction before sleeping failed")
                     finally:
@@ -437,7 +438,9 @@ class Session:
                 if self._client is None:
                     await self._connect()
                 if self._needs_compact() and not self._stopping:
-                    await self._compact("first")
+                    size = self.state.context_tokens
+                    await self.out.notice(f"🗜 Compacting the conversation ({size // 1000}k tokens of context) first…")
+                    await self._compact()
                 # /stop while connecting or compacting: the messages go too.
                 if self._stopping or self._handed_back:
                     continue
@@ -474,10 +477,8 @@ class Session:
             self._compact_asleep and self.state.context_tokens >= self._compact_asleep
         )
 
-    async def _compact(self, when: str) -> None:
+    async def _compact(self) -> None:
         self.compact_next = False
-        size = self.state.context_tokens
-        await self.out.notice(f"🗜 Compacting the conversation ({size // 1000}k tokens of context) {when}…")
         self._compacting = True
         self._turn_ok = False
         try:

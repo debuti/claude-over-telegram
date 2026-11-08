@@ -432,6 +432,17 @@ async def test_compacts_before_sleeping_only_big_and_warm(monkeypatch, context, 
     await until(lambda: sess.entries and not sess.connected)
     assert FakeClient.queries == (["hi", "/compact"] if compacts else ["hi"])
     assert sess.state.context_tokens == (0 if compacts else context + 5)
+    assert sess.out.notices == []  # nothing to leave unread in the chat
+    await sess.close()
+
+
+async def test_compacting_before_a_message_says_so():
+    state = ConvState(cwd="/tmp", session_id="sess-1", context_tokens=5000)
+    sess = make(state, compact_at=1000)
+    FakeClient.scripts = [[result()], [answer(), result()]]
+    await sess.send("hi")
+    await until(lambda: len(sess.entries) == 2)
+    assert sess.out.notices == ["🗜 Compacting the conversation (5k tokens of context) first…"]
     await sess.close()
 
 
