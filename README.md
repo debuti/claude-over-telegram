@@ -104,7 +104,7 @@ All settings live in `.env` next to the code (see `.env.example`):
 | `PERMISSION_MODE`  | `auto`     | Initial permission mode: `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions` |
 | `AUTO_COMPACT_TOKENS` | `150000` | Context size that compacts a conversation, also in the middle of a task (passed to Claude as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`); `0` turns it off |
 | `CACHE_TTL`        | `auto`     | Prompt cache lifetime: `auto` (1 hour on a subscription, 5 minutes with an API key), `5m` or `1h` (passed to Claude too) |
-| `WAKE`             | `auto` | Where a message to a conversation whose cache went cold goes: `auto` lets Haiku decide (compact and continue, or a new conversation) and explains why; `ask` asks with buttons |
+| `WAKE`             | `ask` | Where a message to a conversation whose cache went cold goes: `ask` asks with buttons; `auto` lets Haiku decide (compact and continue, or a new conversation) and explains why |
 | `WAKE_SMALL_TOKENS` | `30000` | Below this context size such a message just continues the conversation, without deciding anything |
 | `KEEPALIVE_HOURS`  | `1` | Keep a conversation's prompt cache warm until this many hours after its last use, with a tiny hidden turn a few minutes before it expires (each costs a tenth of re-sending the context cold). Only for contexts past `WAKE_SMALL_TOKENS`; the cache alarms wait until the keep-alives stop. `1`, the cache's own life, keeps nothing; `3` covers coming back within a few hours |
 | `TOPIC_TITLES`     | `true`     | Keep each topic's name showing its status (see [Using it](#using-it)) |

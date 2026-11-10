@@ -19,6 +19,16 @@ LABELS = {
 }
 
 
+def _label(lim: dict) -> str:
+    # A weekly limit of its own for one model (Fable) or surface, named by the API.
+    scope = lim.get("scope") or {}
+    named = next((part.get("display_name") for part in (scope.get("model"), scope.get("surface"))
+                  if isinstance(part, dict) and part.get("display_name")), None)
+    if lim["kind"] == "weekly_scoped" and named:
+        return f"Week, {named}"
+    return LABELS.get(lim["kind"], lim["kind"].replace("_", " ").capitalize())
+
+
 class Unavailable(Exception):
     pass
 
@@ -138,7 +148,7 @@ async def fetch(cli: str) -> dict:
 def render(data: dict) -> str:
     lines = ["📈 Plan usage"]
     for lim in data.get("limits") or []:
-        label = LABELS.get(lim["kind"], lim["kind"].replace("_", " ").capitalize())
+        label = _label(lim)
         pct = lim.get("percent") or 0
         pace = _pace(pct, lim.get("resets_at")) if lim.get("group") == "weekly" else ""
         lines.append(f"{label}\n{_bar(pct)} {pct:.0f}%  {_until(lim.get('resets_at'))}{pace}")

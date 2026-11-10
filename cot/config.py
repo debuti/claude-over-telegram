@@ -93,7 +93,7 @@ def load(workdir: Path) -> Config:
     cache_ttl = (os.environ.get("CACHE_TTL") or "auto").strip().lower()
     if cache_ttl not in ("auto", "5m", "1h"):
         raise SystemExit(f"CACHE_TTL must be auto, 5m or 1h, not {cache_ttl}")
-    wake = (os.environ.get("WAKE") or "auto").strip().lower()
+    wake = (os.environ.get("WAKE") or "ask").strip().lower()
     if wake not in ("auto", "ask"):
         raise SystemExit(f"WAKE must be auto or ask, not {wake}")
 

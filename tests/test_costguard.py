@@ -192,3 +192,13 @@ def test_warm_left(window, since_use, left, lasts):
 
 def test_warm_left_ends_with_a_cache_barely_longer_than_its_margin():
     assert costguard.warm_left(0, 10, 0, 70, 7200) > 0
+
+
+def test_usage_names_a_model_s_own_weekly_limit():
+    from cot import usage
+
+    text = usage.render({"limits": [
+        {"kind": "weekly_all", "group": "weekly", "percent": 25},
+        {"kind": "weekly_scoped", "group": "weekly", "percent": 1, "scope": {"model": {"display_name": "Fable"}}},
+    ]})
+    assert "Week, all models" in text and "Week, Fable" in text
