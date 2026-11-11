@@ -479,6 +479,7 @@ Issues and pull requests are welcome. The code is small:
 | `cot/triage.py`      | Haiku decides where a message to a cold conversation goes |
 | `cot/uploads.py`, `cot/tg_tools.py` | Files from and to Telegram                  |
 | `cot/store.py`, `cot/config.py`     | Saved conversations, settings               |
+| `claude-for-inner-agents.md` | What every conversation's Claude is told about the bot, added to its system prompt; its Docker section only in a container |
 
 Run `ruff check .` and `pytest` (`pip install pytest pytest-asyncio`) before sending
 changes; CI runs both on Python 3.10 and 3.13. `COT_DEBUG_TTL_SECONDS` makes the bot
