@@ -62,6 +62,14 @@ APPEND_PROMPT = (
     "start it detached, ask for an alarm with set_alarm and end your turn: once the user approves it the "
     "bot ends your process, and the alarm wakes you with a message."
 )
+# Added for conversations whose Claude runs in a container (SANDBOX_DOCKER), so it knows its bounds.
+DOCKER_PROMPT = (
+    " You run in this conversation's own Docker container, limited to {cpus} CPUs and {memory} of memory. "
+    "It sees only this folder, your home (what you install there stays) and some of the user's settings; "
+    "it has no Docker (no docker or docker compose) and shares the host's network, so localhost is the "
+    "host's. Jobs you start detached keep running in it after your process ends: the container goes once "
+    "nothing runs in it, but never while an alarm you set is pending."
+)
 # Every API call re-reads the start of the context, so leave out what can't be used from Telegram:
 # the account's claude.ai connectors and the skills for a desktop, browser or terminal UI.
 CLI_SETTINGS = {
@@ -255,7 +263,7 @@ class Session:
             # send_to_agents and set_alarm are allowed here because they ask by themselves: permission
             # modes that approve on their own must not let an agent write to the others or wake unseen.
             allowed_tools=[tg_tools.SEND_FILE, tg_tools.LIST_AGENTS, tg_tools.SEND_TO_AGENTS, tg_tools.SET_ALARM],
-            system_prompt={"type": "preset", "preset": "claude_code", "append": APPEND_PROMPT},
+            system_prompt={"type": "preset", "preset": "claude_code", "append": self._append_prompt()},
             settings=json.dumps(CLI_SETTINGS),
             cli_path=self._cli_path,
             env={**self._cli_env, "COT_NAME": self._running_as},
@@ -266,6 +274,13 @@ class Session:
             if self._sandbox_bash
             else None,
         )
+
+    def _append_prompt(self) -> str:
+        if not self._in_docker:
+            return APPEND_PROMPT
+        gib = int(self._cli_env.get("COT_MEMORY") or 0) / 1024**3
+        memory = f"{gib:g} GB" if gib else "limited"
+        return APPEND_PROMPT + DOCKER_PROMPT.format(cpus=self._cli_env.get("COT_CPUS", "a few"), memory=memory)
 
     def _container_name(self) -> str:
         """cot-<topic or folder>-<topic id>: tells conversations apart in docker ps."""

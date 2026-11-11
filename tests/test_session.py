@@ -521,3 +521,13 @@ async def test_a_keepalive_while_it_sleeps_for_an_alarm_puts_it_back_to_sleep():
     await until(lambda: sess.entries and not sess.connected)
     assert FakeClient.queries == [session_mod.KEEPALIVE_PROMPT]
     await sess.close()
+
+
+def test_claude_is_told_about_its_container_only_when_in_one():
+    state = ConvState(cwd="/tmp", session_id="sess-1")
+    sess = Session(state, out=FakeOutput(), on_state=lambda st: None, default_mode="auto", cli_path=None,
+                   cli_env={}, sandbox_bash=False)
+    assert "Docker" not in sess._append_prompt()
+    sess._cli_env = {"COT_IMAGE": "x", "COT_CPUS": "2", "COT_MEMORY": str(4 * 1024**3)}
+    prompt = sess._append_prompt()
+    assert "2 CPUs and 4 GB" in prompt and "no docker" in prompt and "alarm" in prompt
