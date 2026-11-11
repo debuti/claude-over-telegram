@@ -288,7 +288,11 @@ bot ends that conversation's Claude process so nothing of it keeps polling: the
 turn running gets a minute to end, then it's interrupted (not if you've written
 to it meanwhile). Only the process: while an alarm is set its container is
 never removed (not when Claude sleeps, nor when the bot restarts), so the tests
-it waits for go on, and the topic's name shows ⏰ instead of 💤. Jobs started
+it waits for go on, and the topic's name shows ⏰ instead of 💤. Its prompt cache is
+kept warm with keep-alives until the alarm rings (whatever `KEEPALIVE_HOURS`
+says), when that costs less than re-sending the context cold then: with the
+1-hour cache, for alarms up to about 18 hours; each keep-alive brings the
+process back for a moment and ends it again. Jobs started
 detached (`setsid nohup`) go on, and the next message, or the alarm, resumes
 the conversation; denied,
 nothing rings and Claude isn't told (so it costs no turn). The time counts from

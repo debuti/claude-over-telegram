@@ -243,3 +243,12 @@ def test_plan_rates_count_the_turns_that_left_the_percent_unchanged(tmp_path):
     rates = costguard.plan_rates(log)
     assert rates["session"] == pytest.approx(1 / (50 * 10_000))
     assert rates["weekly_all"] == costguard.PLAN_RATES["weekly_all"]  # not in the log: the measured one
+
+
+def test_keeping_warm_until_an_alarm_only_when_cheaper():
+    from cot.costguard import worth_keeping
+
+    assert worth_keeping(0, 2 * 3600, 100_000, 3600)
+    assert not worth_keeping(0, 24 * 3600, 100_000, 3600)  # 27 keep-alives cost more than one write
+    assert worth_keeping(0, 30 * 60, 100_000, 300)
+    assert not worth_keeping(0, 3600, 100_000, 300)

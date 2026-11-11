@@ -92,6 +92,8 @@ AGENT_SEND_OUTCOME = "[From the Telegram bot, about your message to other agents
 AGENT_TEXT_LIMIT = 3000  # with the prompt around it, what fits in a Telegram message once escaped
 # What an alarm Claude asked for (set_alarm) brings it when it rings.
 WAKEUP_MESSAGE = "[From the Telegram bot: the alarm you asked for {when} ago rang. You set it to: {reason}]"
+# Keep-alives for an alarm keep the cache this long past it: the alarm loop looks every 15 s.
+WAKEUP_SLACK = 2 * 60
 WAKEUPS_MAX = 3  # asked for or set at once, per conversation
 RESERVE_NAMES = {"session": "5-hour", "weekly_all": "weekly"}
 VERSION_NOTICE_TRIES = 3  # conversations to try the "new version" notice in
@@ -1318,10 +1320,16 @@ class Bot:
         return self._reserve.resets if self._reserve else None
 
     def _keepalive_window(self, state: ConvState) -> float:
-        """KEEPALIVE_HOURS, or up to the reset while the reserve keeps this conversation warm."""
+        """KEEPALIVE_HOURS, or up to the reset while the reserve keeps this conversation warm, or up to
+        its alarm while one is set."""
         window = self.cfg.keepalive
         if self._reserve and state.context_tokens in self._reserve.contexts:  # not the ones it left out
             window = max(window, self._reserve.resets - state.last_active + self.ttl)
+        # Asleep until an alarm: warm until it rings, if that costs less than writing the context then.
+        now = time.time()
+        rings = min((w["at"] for w in state.wakeups if w.get("at")), default=0.0)
+        if rings > now and costguard.worth_keeping(now, rings, state.context_tokens, self.ttl):
+            window = max(window, rings + WAKEUP_SLACK - state.last_active)
         return window
 
     async def _usage_text(self) -> str:

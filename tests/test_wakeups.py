@@ -250,3 +250,17 @@ def test_the_topic_shows_an_alarm_clock_while_it_waits(bot):
     ask(bot)
     press(bot, button(bot.asked[0]))
     assert bot._title(ME, bot.store.get(ME)).startswith(titles.ALARM)
+
+
+def test_keepalives_last_until_the_alarm_when_cheaper(bot, monkeypatch):
+    bot.cfg.keepalive, bot.ttl, bot._reserve = 3600, 3600, None
+    now = time.time()
+    state = bot.store.get(ME)
+    state.context_tokens, state.last_active = 100_000, now
+    assert bot._keepalive_window(state) == 3600
+    state.wakeups = [{"id": "a", "at": now + 3 * 3600}]
+    assert bot._keepalive_window(state) == pytest.approx(3 * 3600 + 120, abs=5)
+    state.wakeups = [{"id": "a", "at": now + 23 * 3600}]  # costs more than writing it again
+    assert bot._keepalive_window(state) == 3600
+    state.wakeups = [{"id": "a", "at": 0.0}]  # asked, not approved
+    assert bot._keepalive_window(state) == 3600

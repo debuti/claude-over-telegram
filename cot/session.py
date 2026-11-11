@@ -495,6 +495,9 @@ class Session:
                 if self._stopping or self._handed_back:
                     continue
                 await self._turn(items)
+                # A keep-alive brought the process back while it sleeps for an alarm: back to sleep.
+                if self._keepalive and self.alarm_set and self._queue.empty() and not self._tasks:
+                    await self._end_process()
             except asyncio.CancelledError:
                 raise
             except Exception as e:

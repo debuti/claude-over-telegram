@@ -511,3 +511,13 @@ async def test_with_an_alarm_set_the_container_is_never_removed(monkeypatch):
     assert [kind for kind, _ in calls] == ["stop", "reap"]
     sess._cli_env = {}
     await sess.close()
+
+
+async def test_a_keepalive_while_it_sleeps_for_an_alarm_puts_it_back_to_sleep():
+    state = ConvState(cwd="/tmp", session_id="sess-1", context_tokens=50_000,
+                      wakeups=[{"id": "a", "at": time.time() + 3600}])
+    sess = make(state, ttl=3600)
+    await sess.keepalive()
+    await until(lambda: sess.entries and not sess.connected)
+    assert FakeClient.queries == [session_mod.KEEPALIVE_PROMPT]
+    await sess.close()

@@ -317,6 +317,12 @@ def keepalives_until(now: float, resets: float, ttl: int) -> int:
     return math.ceil(max(resets - now, 0) / (ttl - keepalive_lead(ttl)))
 
 
+def worth_keeping(now: float, until: float, context: int, ttl: int) -> bool:
+    """Whether keep-alives until then cost less than writing the context again then."""
+    pings = keepalives_until(now, until, ttl)
+    return pings * (context * READ + KEEPALIVE_EXTRA) < context * write_price(ttl)
+
+
 def reserve(
     now: float, limits: list[tuple[str, float, float]], contexts: list[int], ttl: int, rates: dict[str, float]
 ) -> Reserve | None:
