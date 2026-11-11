@@ -283,7 +283,11 @@ Instead of checking on a long test run or build over and over (each check
 re-sends the whole conversation), Claude can ask to be woken up later with a
 `set_alarm` tool: how many minutes from now (up to 24 h) and what to do then.
 You get a button with both, in every permission mode; nothing is set without it.
-Approved, the message shows when it rings and gets a 🔕 Cancel button; denied,
+Approved, the message shows when it rings and gets a 🔕 Cancel button, and the
+bot ends that conversation's Claude process so nothing of it keeps polling: the
+turn running gets a minute to end, then it's interrupted (not if you've written
+to it meanwhile). Jobs started detached (`setsid nohup`) go on, and the next
+message, or the alarm, resumes the conversation; denied,
 nothing rings and Claude isn't told (so it costs no turn). The time counts from
 when Claude asked, so one approved late rings at once. When it rings the topic
 shows `⏰ Alarm` and Claude gets a message with its reason, past the wake warning

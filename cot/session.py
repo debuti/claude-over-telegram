@@ -60,7 +60,8 @@ APPEND_PROMPT = (
     "a single command run in the background, which tells you when it ends, e.g. Bash with "
     "run_in_background and `while kill -0 PID 2>/dev/null; do sleep 15; done; tail -n 50 job.log`, "
     "and end your turn meanwhile. For one that runs for long, or when you only need to look again later, "
-    "ask for an alarm with set_alarm (the user approves it) and end your turn: it wakes you with a message."
+    "start it detached, ask for an alarm with set_alarm and end your turn: once the user approves it the "
+    "bot ends your process, and the alarm wakes you with a message."
 )
 # Every API call re-reads the start of the context, so leave out what can't be used from Telegram:
 # the account's claude.ai connectors and the skills for a desktop, browser or terminal UI.
@@ -88,6 +89,10 @@ TASK_WAIT = 6 * 60 * 60
 # Telegram splits long texts into several messages: wait this long after the last one
 # so they reach Claude as a single turn. Messages queued during a turn merge too.
 GATHER_SECONDS = 3.0
+# Put to sleep for an alarm: how long the running turn gets to end on its own before it's
+# interrupted, and then how long the interrupt gets.
+SLEEP_GRACE = 60.0
+SLEEP_INTERRUPT = 30.0
 
 # What a keep-alive turn sends: as short an answer as possible, and nothing done.
 KEEPALIVE_PROMPT = (
@@ -350,6 +355,33 @@ class Session:
             if self._client:
                 await self._client.interrupt()
         return running, dropped
+
+    async def sleep(self, grace: float = SLEEP_GRACE) -> bool:
+        """End the Claude process, and with it whatever it runs (background waits, polling loops).
+
+        The running turn gets `grace` seconds to end, then it's interrupted. Not if messages
+        are waiting for Claude by then: someone is talking to it. True if no process is left.
+        Jobs started detached (setsid nohup) live on; so does the conversation, resumed by the next message.
+        """
+        deadline = time.monotonic() + grace
+        while self.busy and time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+        if self.busy and not self.queued:
+            self._stopping = True
+            await permissions.cancel_for(self.out)
+            if self._client:
+                await self._client.interrupt()
+            deadline = time.monotonic() + SLEEP_INTERRUPT
+            while self.busy and time.monotonic() < deadline:
+                await asyncio.sleep(0.5)
+        if self._client is None:
+            return True
+        if self.pending:
+            return False
+        await self._disconnect()
+        if self._in_docker:
+            await asyncio.to_thread(container.reap, self._running_as or self._container_name())
+        return True
 
     async def set_model(self, model: str | None) -> None:
         self.state.model = model

@@ -189,3 +189,44 @@ def test_someone_else_cant_press_it(bot):
     query.from_user.id = 8
     asyncio.run(bot._on_button(SimpleNamespace(callback_query=query), None))
     assert not bot.store.get(ME).wakeups[0]["at"]
+
+
+def test_allowed_it_ends_claudes_process(bot):
+    slept = []
+
+    class Sess:
+        connected = True
+
+        async def sleep(self):
+            slept.append(True)
+            return True
+
+    sess = Sess()
+    sess.state = bot.store.get(ME)
+    bot.sessions = {ME: sess}
+    bot._sleeping = set()
+
+    async def go():
+        await bot._ask_wakeup(ME, 5, "look at job.log")
+        query = Query(button(bot.asked[0]))
+        await bot._on_button(SimpleNamespace(callback_query=query), None)
+        await asyncio.gather(*bot._sleeping)
+
+    asyncio.run(go())
+    assert slept and "ended" in bot.posted[-1]
+
+
+def test_denied_claude_is_left_alone(bot):
+    class Sess:
+        connected = True
+
+        async def sleep(self):
+            raise AssertionError("not to be ended")
+
+    sess = Sess()
+    sess.state = bot.store.get(ME)
+    bot.sessions = {ME: sess}
+    bot._sleeping = set()
+    ask(bot)
+    press(bot, button(bot.asked[0], 1))
+    assert not bot._sleeping

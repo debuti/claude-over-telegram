@@ -457,3 +457,37 @@ def test_transcript_context_starts_over_at_a_compaction(monkeypatch, tmp_path):
     assert transcript_context("s")[0] == 0
     path.write_text("\n".join(json.dumps(e) for e in [*lines, said]))
     assert transcript_context("s")[0] == 500
+
+
+async def test_sleep_ends_the_process_once_the_turn_is_over():
+    sess = make()
+    await sess.send("hi")
+    await until(lambda: sess.entries)
+    assert sess.connected
+    assert await sess.sleep(grace=1)
+    assert not sess.connected
+    await sess.send("again")  # the next message brings it back
+    await until(lambda: len(sess.entries) == 2)
+    assert FakeClient.queries == ["hi", "again"]
+    await sess.close()
+
+
+async def test_sleep_interrupts_a_turn_that_goes_on_polling():
+    sess = make()
+    FakeClient.scripts = [[answer(), INTERRUPT, result(is_error=True)]]
+    await sess.send("run the tests")
+    await until(lambda: sess.busy)
+    assert await sess.sleep(grace=0.05)
+    assert not sess.busy and not sess.connected
+    await sess.close()
+
+
+async def test_sleep_leaves_it_up_if_a_message_waits():
+    sess = make()
+    FakeClient.scripts = [[answer(), INTERRUPT, result()]]
+    await sess.send("first")
+    await until(lambda: sess.busy)
+    await sess.send("second")
+    assert not await sess.sleep(grace=0.05)
+    assert sess.connected
+    await sess.close()

@@ -135,7 +135,9 @@ def make_server(
         "set_alarm",
         "Ask to be woken up later with a message, instead of checking on something over and over (a test "
         "run, a build, a deploy). This returns at once: the alarm is set only if the user approves it with "
-        "a button. End your turn after asking; when it rings you get a message with the reason.",
+        "a button. Once it's approved the bot ends your process, so anything you run that isn't detached "
+        "(setsid nohup) stops: start the job detached first, then ask, then end your turn. When it rings "
+        "you get a message with the reason.",
         SET_ALARM_SCHEMA,
     )
     async def set_alarm(args: dict[str, Any]) -> dict[str, Any]:

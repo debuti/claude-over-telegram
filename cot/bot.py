@@ -178,6 +178,7 @@ class Bot:
         # The reserve _blocked last saw (None: none due), and the reset whose reserve the user spent.
         self._reserve: costguard.Reserve | None = None
         self._reserve_skip = 0.0
+        self._sleeping: set[asyncio.Task] = set()  # Claude processes being ended for an alarm
         self._titles_pause = 0.0  # no renames before this: Telegram asked to slow down
         self.usage_log = usagelog.UsageLog(cfg.state_dir / "usage.jsonl", cfg.cli_path or container.bundled_cli())
         self.app = (
@@ -571,8 +572,9 @@ class Bot:
         )
         self.store.put(key, state)
         return (
-            "Asked the user. If they approve it, a message wakes you when it rings; if they refuse it, "
-            "nothing rings and you aren't told. End your turn now; don't check meanwhile."
+            "Asked the user. If they approve it, the bot ends your process (what isn't detached stops) and "
+            "a message wakes you when it rings; if they refuse it, nothing rings and you aren't told. "
+            "End your turn now; don't check meanwhile."
         )
 
     async def _on_wakeup(self, key: Key, query, rest: str) -> None:
@@ -608,6 +610,18 @@ class Bot:
             )
         except TelegramError as e:
             log.warning("could not update the alarm's message: %s", e)
+        if keyboard and (sess := self.sessions.get(key)) and sess.connected:
+            # Not left to Claude: whatever it would keep polling with goes with its process.
+            task = asyncio.create_task(self._put_to_sleep(key, sess))
+            self._sleeping.add(task)
+            task.add_done_callback(self._sleeping.discard)
+
+    async def _put_to_sleep(self, key: Key, sess: Session) -> None:
+        try:
+            if await sess.sleep():
+                await self._output(key).notice("💤 Claude's process ended until the alarm rings")
+        except Exception:
+            log.exception("putting Claude to sleep for its alarm failed")
 
     async def _check_wakeups(self, key: Key, state: ConvState) -> None:
         """Rings the approved alarms that are due: each reaches Claude as a message."""
