@@ -116,6 +116,13 @@ MODELS = {
 }
 
 
+def _inside(path: str, root: Path) -> bool:
+    try:
+        return Path(path).resolve().is_relative_to(root)
+    except OSError:
+        return False
+
+
 def newer_version(repo: Path) -> str | None:
     """The checkout's version if it isn't the one running and it is all committed: not half-way through a change."""
     try:
@@ -903,8 +910,9 @@ class Bot:
         if seen.exists() and seen.read_text().strip() == __version__:
             return
         known = [(key, state) for key, state in self.store.items() if self._assigned(key)]
-        known.sort(key=lambda item: item[1].last_active, reverse=True)
-        # The most recent conversation; the next ones in case its topic was deleted.
+        # The one working on the bot itself made the update: it goes there, then to the most recent.
+        known.sort(key=lambda item: (_inside(item[1].cwd, REPO_DIR), item[1].last_active), reverse=True)
+        # The next ones in case its topic was deleted.
         for key, _ in known[:VERSION_NOTICE_TRIES]:
             if await self._output(key).send_html(f"🔄 Updated to v{__version__}", silent=True):
                 break

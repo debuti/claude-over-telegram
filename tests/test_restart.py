@@ -139,3 +139,12 @@ async def test_with_no_conversation_it_only_remembers_the_version(announcer, tmp
     await announcer._announce_version()
     assert announcer.sent == []
     assert (tmp_path / "version").read_text() == __version__
+
+
+async def test_it_goes_first_to_the_conversation_working_on_the_bot(announcer, tmp_path):
+    from cot.config import REPO_DIR
+
+    announcer.store.put((1, 3), ConvState(cwd=str(tmp_path), last_active=20.0))
+    announcer.store.put((1, 4), ConvState(cwd=str(REPO_DIR), last_active=10.0))
+    await announcer._announce_version()
+    assert [key for key, _, _ in announcer.sent] == [(1, 4)]
