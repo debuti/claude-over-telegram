@@ -202,3 +202,44 @@ def test_usage_names_a_model_s_own_weekly_limit():
         {"kind": "weekly_scoped", "group": "weekly", "percent": 1, "scope": {"model": {"display_name": "Fable"}}},
     ]})
     assert "Week, all models" in text and "Week, Fable" in text
+
+
+RATES = {"session": 2.2e-5, "weekly_all": 1.5e-6}
+HOURS_5 = 5 * 3600
+
+
+@pytest.mark.parametrize("percent, due", [(98, True), (97, False), (100, False)])
+def test_reserve_starts_once_whats_left_only_covers_the_keep_alives(percent, due):
+    # 6 keep-alives of 12k equivalent tokens: ~1.6% of the window, plus the 1% margin.
+    found = costguard.reserve(0, [("session", percent, HOURS_5)], [100_000], 3600, RATES)
+    assert (found is not None) == due
+    if due:
+        assert found.kind == "session" and found.resets == HOURS_5 and found.contexts == (100_000,)
+        assert found.percent == pytest.approx(1 + 6 * 12_000 * 2.2e-5)
+
+
+def test_no_reserve_for_a_reset_too_far_to_pay():
+    # 3 days of keep-alives cost more than writing the context again after it.
+    assert costguard.reserve(0, [("weekly_all", 99, 3 * 86400)], [100_000], 3600, RATES) is None
+    assert costguard.reserve(0, [("weekly_all", 99, 6 * 3600)], [100_000], 3600, RATES) is not None
+
+
+def test_no_reserve_without_conversations_to_keep_warm():
+    assert costguard.reserve(0, [("session", 99, HOURS_5)], [], 3600, RATES) is None
+
+
+def test_reserve_keeps_the_biggest_that_fit():
+    found = costguard.reserve(0, [("session", 99, HOURS_5)], [40_000, 100_000, 100_000, 100_000], 3600, RATES)
+    # A third 100k one no longer fits; the 40k one still does.
+    assert found.contexts == (100_000, 100_000, 40_000) and found.percent <= costguard.RESERVE_MAX
+
+
+def test_plan_rates_count_the_turns_that_left_the_percent_unchanged(tmp_path):
+    log = tmp_path / "usage.jsonl"
+    turn = {"tokens": {"cache_read_input_tokens": 100_000}, "parallel": 0}  # 10k equivalent
+    lines = [dict(turn, before={"session": 10}, after={"session": 10 + (i == 0)}) for i in range(50)]
+    lines.append(dict(turn, before={"session": 90}, after={"session": 0}))  # it reset: left out
+    log.write_text("\n".join(json.dumps(x) for x in lines))
+    rates = costguard.plan_rates(log)
+    assert rates["session"] == pytest.approx(1 / (50 * 10_000))
+    assert rates["weekly_all"] == costguard.PLAN_RATES["weekly_all"]  # not in the log: the measured one

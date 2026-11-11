@@ -35,6 +35,7 @@ class Config:
     wake_small: int  # context tokens below which such a message just continues it
     eur_per_usd: float  # to show costs in euros
     keepalive: float  # seconds after its last use a big conversation's cache is kept warm
+    limit_reserve: bool  # near a plan limit, keep its last bit for keep-alives until it resets
     topic_titles: bool  # keep each topic's name showing its status
 
 
@@ -126,6 +127,7 @@ def load(workdir: Path) -> Config:
         wake_small=int(os.environ.get("WAKE_SMALL_TOKENS") or 30_000),
         eur_per_usd=float(os.environ.get("EUR_PER_USD") or 0.87),
         keepalive=float(os.environ.get("KEEPALIVE_HOURS") or 1) * 3600,
+        limit_reserve=os.environ.get("LIMIT_RESERVE", "true").lower() in ("1", "true", "yes"),
         topic_titles=os.environ.get("TOPIC_TITLES", "true").lower() in ("1", "true", "yes"),
         docker_exclude=frozenset(x for x in os.environ.get("DOCKER_EXCLUDE", "").replace(" ", "").split(",") if x),
     )

@@ -90,6 +90,7 @@ AGENT_MESSAGE = (
 )
 AGENT_SEND_OUTCOME = "[From the Telegram bot, about your message to other agents: {outcome}. It said:]\n\n{text}"
 AGENT_TEXT_LIMIT = 3000  # with the prompt around it, what fits in a Telegram message once escaped
+RESERVE_NAMES = {"session": "5-hour", "weekly_all": "weekly"}
 VERSION_NOTICE_TRIES = 3  # conversations to try the "new version" notice in
 
 # What goes to Claude, ahead of any waiting messages, to carry on with a turn a lost login cut short.
@@ -161,6 +162,10 @@ class Bot:
         # The plan usage the alarms last fetched: (time, data or None if unavailable).
         self._plan: tuple[float, dict | None] = (0.0, None)
         self._plan_lock = asyncio.Lock()  # messages arriving during a fetch keep their order
+        self._rates = dict(costguard.PLAN_RATES)  # % of each window per equivalent token
+        # The reserve _blocked last saw (None: none due), and the reset whose reserve the user spent.
+        self._reserve: costguard.Reserve | None = None
+        self._reserve_skip = 0.0
         self._titles_pause = 0.0  # no renames before this: Telegram asked to slow down
         self.usage_log = usagelog.UsageLog(cfg.state_dir / "usage.jsonl", cfg.cli_path or container.bundled_cli())
         self.app = (
@@ -380,7 +385,8 @@ class Bot:
             self.store.put(key, state)
             return
         if check and (state.limit_until or await self._blocked()):
-            await self._on_limited(key, [{"text": text, "ids": ids or []}], self._plan_resets())
+            reserve = None if await self._hard_blocked() else self._reserve
+            await self._on_limited(key, [{"text": text, "ids": ids or []}], self._plan_resets(), reserve=reserve)
             return
         if check and self._should_hold(key):
             state.held.append({"text": text, "ids": ids or []})
@@ -519,8 +525,15 @@ class Bot:
             return False
         return costguard.is_cold(time.time(), state.last_api_at or state.last_active, self.ttl)
 
-    async def _on_limited(self, key: Key, items: list[dict], resets: float | None, cut: bool = False) -> None:
-        """A plan limit stops Claude: messages wait, in order, until _check_limit sees it gone."""
+    async def _on_limited(
+        self,
+        key: Key,
+        items: list[dict],
+        resets: float | None,
+        cut: bool = False,
+        reserve: costguard.Reserve | None = None,
+    ) -> None:
+        """A plan limit stops Claude, or its reserve: messages wait, in order, until _check_limit sees it gone."""
         state = self._state(key)
         state.held = items + state.held
         if not resets and not state.limit_until:  # going on by itself hit it again, with no time to wait for
@@ -535,11 +548,20 @@ class Bot:
         if items or cut:
             when = f", {usage.until(resets)}" if resets else ""
             text = f"⏸ Plan limit reached{when}. {what}"
+            if reserve:
+                n = len(reserve.contexts)
+                text = (
+                    f"⏸ Saving the last {reserve.percent:.0f}% of the {RESERVE_NAMES[reserve.kind]} limit to keep "
+                    f"{n} conversation{'s' * (n > 1)} warm until it resets{when}: coming back then costs a tenth. "
+                    f"{what}"
+                )
             if state.limit_auto:
                 await self._output(key).notice(f"{text}; once it lifts I'll go on, as you asked. /stop drops it.")
                 return
             text += "; once it lifts I'll ask for your OK to go on, unless you choose now. /stop drops it."
             rows = [[("⏰ Continue when it lifts", "send")]]
+            if reserve:
+                rows.insert(0, [("▶️ Send it anyway", "anyway")])
             if state.context_tokens >= self.cfg.wake_small:
                 kilo = costguard.kilo(state.context_tokens)
                 text += f"\n\nIf its cache has expired by then, continuing re-sends {kilo} tokens."
@@ -721,6 +743,13 @@ class Bot:
     async def _on_prompt(self, key: Key, kind: str, action: str) -> None:
         """A button of the live warning was tapped (its buttons are already gone)."""
         state = self._state(key)
+        if kind == "schedule" and action == "anyway":  # spends the reserve: for every conversation, until it resets
+            self._reserve_skip = max(self._reserve_skip, state.limit_until)
+            self._reserve = None
+            state.limit_until = 0.0
+            self.store.put(key, state)
+            await self._release(key)
+            return
         if kind == "schedule":  # _check_limit acts on it once the limit lifts
             state.limit_auto = action
             self.store.put(key, state)
@@ -891,7 +920,8 @@ class Bot:
             if state.pending and self._assigned(key):
                 if await self._blocked():
                     pending, state.pending = state.pending, []
-                    await self._on_limited(key, pending, self._plan_resets())
+                    reserve = None if await self._hard_blocked() else self._reserve
+                    await self._on_limited(key, pending, self._plan_resets(), reserve=reserve)
                 else:
                     n = len(state.pending)
                     await self._output(key).notice(f"↩️ Passing on {n} message{'s' * (n > 1)} sent before the restart")
@@ -930,7 +960,7 @@ class Bot:
                     await self._check_limit(key, state)
                     if self.cfg.topic_titles:
                         await self._check_title(key, state)
-                    if self.cfg.cache_alarms or self.cfg.keepalive > self.ttl:
+                    if self.cfg.cache_alarms or self.cfg.keepalive > self.ttl or self.cfg.limit_reserve:
                         await self._check_alarm(key, state)
                 except Exception:
                     log.exception("login or plan limit check, cache alarm or keep-alive failed")
@@ -992,13 +1022,13 @@ class Bot:
         if (
             not state.session_id
             or state.login_lost_at
-            or state.limit_until
+            or (state.limit_until and not self._reserve)
             or state.limit_cut
             or state.context_tokens < self.cfg.wake_small
             or (data and usage.blocked(data) is not None)
         ):
             return left
-        return costguard.warm_left(now, left, state.last_active, self.ttl, self.cfg.keepalive)
+        return costguard.warm_left(now, left, state.last_active, self.ttl, self._keepalive_window(state))
 
     async def _check_title(self, key: Key, state: ConvState) -> None:
         """Keep the topic's name showing its status. Only with its real name known (Telegram has no
@@ -1034,16 +1064,20 @@ class Bot:
             return
         if not state.context_tokens:
             return
-        if state.login_lost_at or state.limit_until or state.limit_cut:
+        if state.login_lost_at or state.limit_cut:
             return
         now = time.time()
         left = costguard.cache_left(now, state.last_api_at, self.ttl)
+        if self.cfg.limit_reserve and left > 0 and state.context_tokens >= self.cfg.wake_small:
+            await self._reserving()  # it may keep this one warm until the reset
+        if state.limit_until and not self._reserve:  # waiting for the limit itself
+            return
+        window = self._keepalive_window(state)
         if state.context_tokens >= self.cfg.wake_small and costguard.keeps_alive(
-            now, left, state.last_active, self.ttl, self.cfg.keepalive
+            now, left, state.last_active, self.ttl, window
         ):  # the cache won't expire yet: no alarms
-            if costguard.keepalive_due(
-                now, left, state.last_active, self.ttl, self.cfg.keepalive
-            ) and not await self._blocked():
+            due = costguard.keepalive_due(now, left, state.last_active, self.ttl, window)
+            if due and not await self._hard_blocked():
                 await self._session(key).keepalive()
             return
         if left <= 0 and alarm and alarm["step"]:
@@ -1078,10 +1112,10 @@ class Bot:
             text += "\n\n" + await self._usage_text()
         await self._output(key).send_html(esc(text))
 
-    async def _blocked(self) -> bool:
-        """Whether a plan limit stops Claude now (fetched at most once a minute; False if unknown)."""
+    async def _plan_data(self) -> dict | None:
+        """The plan usage, fetched at most once a minute; None if unknown."""
         if self.cfg.api_key:
-            return False
+            return None
         async with self._plan_lock:
             at, data = self._plan
             if time.time() - at > 60:
@@ -1090,14 +1124,69 @@ class Bot:
                 except Exception as e:
                     log.debug("plan usage not available: %s", e)
                     data = None
+                if data and self.cfg.limit_reserve:
+                    self._rates = await asyncio.to_thread(costguard.plan_rates, self.cfg.state_dir / "usage.jsonl")
                 self._plan = (time.time(), data)
+        return data
+
+    async def _hard_blocked(self) -> bool:
+        """Whether a plan limit itself stops Claude now: keep-alives can't go either."""
+        data = await self._plan_data()
         return bool(data) and usage.blocked(data) is not None
 
+    async def _blocked(self) -> bool:
+        """Whether real work stops now: a plan limit, or the reserve kept for keep-alives before it."""
+        return await self._hard_blocked() or await self._reserving() is not None
+
+    async def _reserving(self) -> costguard.Reserve | None:
+        """The reserve due now (see costguard.reserve), unless the user chose to spend it."""
+        data = await self._plan_data()
+        self._reserve = None
+        if not self.cfg.limit_reserve or not data or usage.blocked(data) is not None:
+            return None
+        extra = data.get("extra_usage") or {}
+        if extra.get("is_enabled") and (extra.get("utilization") or 0) < 100:  # going past it doesn't stop Claude
+            return None
+        limits = [
+            (lim["kind"], lim.get("percent") or 0, usage.epoch(lim["resets_at"]))
+            for lim in data.get("limits") or []
+            if lim.get("kind") in costguard.RESERVE_KINDS and lim.get("resets_at")
+        ]
+        now = time.time()
+        contexts = []
+        for key, state in self.store.items():
+            sess = self.sessions.get(key)
+            state = sess.state if sess else state
+            if (
+                state.session_id
+                and state.last_api_at
+                and state.context_tokens >= self.cfg.wake_small
+                and not state.login_lost_at
+                and not state.limit_cut
+                and costguard.cache_left(now, state.last_api_at, self.ttl) > 0
+                and self._assigned(key)
+            ):
+                contexts.append(state.context_tokens)
+        found = costguard.reserve(now, limits, contexts, self.ttl, self._rates)
+        if found and found.resets <= self._reserve_skip + 60:  # the user chose to spend this one
+            return None
+        self._reserve = found
+        return found
+
     def _plan_resets(self) -> float | None:
-        """When the limit _blocked last saw resets; None if unknown."""
+        """When the limit _blocked last saw resets, or the one its reserve is for; None if unknown."""
         data = self._plan[1]
         iso = usage.blocked(data) if data else None
-        return usage.epoch(iso) if iso else None
+        if iso:
+            return usage.epoch(iso)
+        return self._reserve.resets if self._reserve else None
+
+    def _keepalive_window(self, state: ConvState) -> float:
+        """KEEPALIVE_HOURS, or up to the reset while the reserve keeps this conversation warm."""
+        window = self.cfg.keepalive
+        if self._reserve and state.context_tokens in self._reserve.contexts:  # not the ones it left out
+            window = max(window, self._reserve.resets - state.last_active + self.ttl)
+        return window
 
     async def _usage_text(self) -> str:
         try:

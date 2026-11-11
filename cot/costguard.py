@@ -9,6 +9,7 @@ calibrating against the usage log.
 """
 
 import json
+import math
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
@@ -253,3 +254,91 @@ def format_cost(
         pct = equivalent * calibration.percent_per_token
         parts.append(f"~{pct:.0f}% of your 5-hour window" if pct >= 1 else f"~{pct:.1f}% of your 5-hour window")
     return " · ".join(parts)
+
+
+# The reserve: near a plan limit the last bit of it is kept for keep-alives, so the big
+# conversations come back warm once it resets instead of writing their whole context again.
+# What is left of a window when it resets is lost anyway; the context written again after it
+# is paid from the new one.
+RESERVE_KINDS = ("session", "weekly_all")
+# Share of each window one equivalent token takes, measured on 2026-11-11 over ~500 turns
+# (usage.jsonl, ratio of sums): used until the log has enough of its own.
+PLAN_RATES = {"session": 2.2e-5, "weekly_all": 1.5e-6}
+PLAN_RATE_ENTRIES = 500
+PLAN_RATE_MIN = 50
+KEEPALIVE_EXTRA = 2_000  # equivalent tokens of a keep-alive besides re-reading the context
+RESERVE_MARGIN = 1.0  # %: the percent comes in whole numbers and a while late; a turn may be running
+RESERVE_MAX = 5.0  # %: a bigger reserve would stop real work too early
+
+
+def plan_rates(path: Path) -> dict[str, float]:
+    """% of each window per equivalent token, from the newest turns that ran alone.
+
+    Turns that left the whole-number percent unchanged count too (a ratio of sums, not a
+    median of the ones that moved it): small turns would look far costlier otherwise.
+    """
+    rates = dict(PLAN_RATES)
+    try:
+        lines = path.read_text().splitlines()[-PLAN_RATE_ENTRIES:]
+    except OSError:
+        return rates
+    sums = {kind: [0.0, 0.0, 0] for kind in RESERVE_KINDS}
+    for line in lines:
+        try:
+            e = json.loads(line)
+            if e.get("parallel"):
+                continue
+            equiv = weighted(e.get("tokens") or {}, e.get("ttl_s") or 3600)
+            for kind, acc in sums.items():
+                before, after = (e.get("before") or {}).get(kind), (e.get("after") or {}).get(kind)
+                if before is None or after is None or not 0 <= after - before < 50:  # < 0: it reset
+                    continue
+                acc[0] += after - before
+                acc[1] += equiv
+                acc[2] += 1
+        except (ValueError, AttributeError, TypeError):
+            continue
+    for kind, (percent, equiv, n) in sums.items():
+        if n >= PLAN_RATE_MIN and equiv > 0 and percent > 0:
+            rates[kind] = percent / equiv
+    return rates
+
+
+@dataclass(frozen=True)
+class Reserve:
+    kind: str  # the limit it is for
+    resets: float  # epoch
+    percent: float  # of that limit held back
+    contexts: tuple[int, ...]  # of the conversations it keeps warm
+
+
+def keepalives_until(now: float, resets: float, ttl: int) -> int:
+    """Keep-alives one conversation needs for its cache to last until resets."""
+    return math.ceil(max(resets - now, 0) / (ttl - keepalive_lead(ttl)))
+
+
+def reserve(
+    now: float, limits: list[tuple[str, float, float]], contexts: list[int], ttl: int, rates: dict[str, float]
+) -> Reserve | None:
+    """The reserve due now, or None. limits: (kind, percent, resets epoch); contexts: of the
+    conversations whose cache is warm and big enough to keep.
+
+    Only the conversations whose keep-alives until the reset cost less than writing their
+    context again count, the biggest first while the reserve stays within RESERVE_MAX.
+    """
+    best = None
+    for kind, percent, resets in limits:
+        if kind not in rates or percent >= 100 or resets <= now:
+            continue
+        pings = keepalives_until(now, resets, ttl)
+        kept, need = [], RESERVE_MARGIN
+        for c in sorted(contexts, reverse=True):  # the biggest save the most
+            cost = pings * (c * READ + KEEPALIVE_EXTRA)
+            if cost < c * write_price(ttl) and need + cost * rates[kind] <= RESERVE_MAX:
+                kept.append(c)
+                need += cost * rates[kind]
+        if not kept or percent < 100 - need:
+            continue
+        if best is None or resets > best.resets:
+            best = Reserve(kind, resets, need, tuple(kept))
+    return best

@@ -1,5 +1,6 @@
 """Held messages and the nonce-guarded prompt, with Telegram and the sessions stubbed out."""
 
+import asyncio
 import json
 import time
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from cot.session import KEEPALIVE_PROMPT
 from cot.store import ConvState, Store
 
 KEY = (1, None)
+REAL_BLOCKED, REAL_HARD_BLOCKED = Bot._blocked, Bot._hard_blocked  # before the fixture stubs them
 
 
 class TgBot:
@@ -67,7 +69,8 @@ class Query:
 def bot(tmp_path, monkeypatch):
     b = object.__new__(Bot)
     b.cfg = SimpleNamespace(
-        workdir=tmp_path, wake="ask", wake_small=30_000, eur_per_usd=0.9, state_dir=tmp_path, cli_path="claude"
+        workdir=tmp_path, wake="ask", wake_small=30_000, eur_per_usd=0.9, state_dir=tmp_path, cli_path="claude",
+        limit_reserve=False, api_key=False,
     )
     b.ttl = 3600
     b.store = Store(tmp_path / "sessions.json")
@@ -79,11 +82,13 @@ def bot(tmp_path, monkeypatch):
     b.sess = SimpleNamespace(compact_next=False, stop=None)
     b.hold = True
     b.limit, b._plan = False, (0.0, None)
+    b._reserve, b._reserve_skip, b._rates = None, 0.0, {}
 
     async def blocked(self):
         return self.limit
 
     monkeypatch.setattr(Bot, "_blocked", blocked)
+    monkeypatch.setattr(Bot, "_hard_blocked", blocked)
     monkeypatch.setattr(Bot, "_output", lambda self, key: self.out)
     monkeypatch.setattr(Bot, "_should_hold", lambda self, key: self.hold)
 
@@ -690,3 +695,52 @@ def test_excerpt_leaves_keepalives_out_and_keeps_how_messages_end(monkeypatch, t
     path.write_text("\n".join(lines))
     got = triage.excerpt("s").splitlines()
     assert len(got) == 2 and got[0] == "User: hi" and got[1].endswith("shall I go on?")
+
+
+@pytest.fixture
+def reserving(bot, monkeypatch):
+    """At 98% of the 5-hour window with 5 hours left and one big warm conversation: the reserve is due."""
+    monkeypatch.setattr(Bot, "_blocked", REAL_BLOCKED)
+    monkeypatch.setattr(Bot, "_hard_blocked", REAL_HARD_BLOCKED)
+    monkeypatch.setattr(Bot, "_assigned", lambda self, key: True)
+    bot.hold = False
+    bot.cfg.limit_reserve, bot.cfg.keepalive, bot.cfg.cache_alarms, bot.alarms = True, 3600, (), {}
+    bot._rates, bot._plan_lock = {"session": 2.2e-5, "weekly_all": 1.5e-6}, asyncio.Lock()
+    resets = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 5 * 3600))
+    bot._plan = (time.time(), {"limits": [{"kind": "session", "percent": 98, "resets_at": resets}]})
+    state = bot.store.get(KEY)
+    state.last_api_at = state.last_active = time.time() - 60
+    state.context_tokens = 100_000
+    bot.store.put(KEY, state)
+    return bot
+
+
+async def test_the_reserve_holds_messages_and_says_what_for(reserving):
+    await reserving._submit(KEY, "one", [1])
+    assert reserving.delivered == []
+    text, markup = reserving.out.sent[0]
+    assert "Saving the last 3% of the 5-hour limit to keep 1 conversation warm" in text
+    assert markup.inline_keyboard[0][0].text == "▶️ Send it anyway"
+    query, rest = tap(reserving, "anyway")
+    await reserving._on_guard(KEY, query, rest)
+    assert reserving.delivered == ["one"]
+    await reserving._submit(KEY, "two", [2])  # spent until it resets: no more holding
+    assert reserving.delivered == ["one", "two"]
+
+
+async def test_the_reserve_keeps_the_cache_warm_past_keepalive_hours(reserving):
+    state = reserving.store.get(KEY)
+    state.last_active = time.time() - 3 * 3600  # long past KEEPALIVE_HOURS
+    state.last_api_at = time.time() - 3500  # its last keep-alive's cache is about to go
+    state.limit_until = time.time() + 5 * 3600  # a message waits for the reset
+    pings = []
+
+    async def keepalive():
+        pings.append(True)
+
+    reserving.sess.keepalive, reserving.sess.pending = keepalive, False
+    await reserving._check_alarm(KEY, state)
+    assert pings == [True]
+    reserving.cfg.limit_reserve, reserving._reserve = False, None  # without it the wait for the limit sends none
+    await reserving._check_alarm(KEY, state)
+    assert pings == [True]
