@@ -38,9 +38,9 @@ class UsageLog:
             if time.monotonic() - at < FRESH:
                 return limits
             try:
-                data = await usage.fetch(self._cli)
+                data = await usage.fetch(self._cli, FRESH)
                 limits = {lim["kind"]: lim.get("percent") for lim in data.get("limits") or []}
-            except usage.Unavailable:
+            except (usage.Unavailable, usage.RateLimited):
                 limits = None
             except Exception as e:
                 log.warning("usage for the log failed: %s", e)

@@ -22,6 +22,9 @@ and only the Telegram users you allow can talk to it.
 - Send photos and files to Claude; Claude can send files back.
 - Writes confined to the workdir (and optionally Bash too, through a sandbox).
 - `/usage` shows your plan limits, `/cost` the API-price estimate of a conversation.
+  The bot asks the usage endpoint at most every few seconds for all its uses together;
+  when it answers 429 the bot waits as told (or backs off from 1 to 15 min), `/usage`
+  shows the last reading meanwhile and sends a fresh one once it may ask again.
   Every turn is logged to `state/usage.jsonl` with its cost and the plan limits
   before and after it, and with how the prompt cache stood (idle time, what the
   first call read from the cache and wrote to it, `cache_break` when the cache was

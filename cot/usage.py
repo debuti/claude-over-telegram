@@ -33,6 +33,28 @@ class Unavailable(Exception):
     pass
 
 
+class RateLimited(Exception):
+    """The endpoint said 429: no use asking again before `until` (epoch)."""
+
+    def __init__(self, until: float):
+        super().__init__(f"the usage endpoint is rate-limited, {retry_in(until)}")
+        self.until = until
+
+
+# Every reader (/usage, the usage log, the limit checks) shares one reading and one back-off,
+# so that together they don't ask the endpoint more than it allows.
+_last: tuple[float, dict] | None = None  # (epoch, data) of the latest good reading
+_retry_at = 0.0  # no request before this, after a 429
+_backoff = 0.0
+_lock: asyncio.Lock | None = None
+BACKOFF_MIN, BACKOFF_MAX = 60.0, 900.0
+
+
+def last() -> tuple[float, dict] | None:
+    """The latest good reading (epoch, data), however old."""
+    return _last
+
+
 def _credentials() -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / ".credentials.json"
 
@@ -101,6 +123,25 @@ def until(epoch: float) -> str:
     return _until(datetime.fromtimestamp(epoch, timezone.utc).isoformat())
 
 
+def retry_at() -> float:
+    """No request to the endpoint before this (epoch); in the past when it can be asked."""
+    return _retry_at
+
+
+def fresh(max_age: float) -> bool:
+    return bool(_last) and time.time() - _last[0] <= max_age
+
+
+def ago(at: float) -> str:
+    secs = time.time() - at
+    return f"{_duration(secs)} ago" if secs >= 60 else "under a minute ago"
+
+
+def retry_in(at: float) -> str:
+    secs = at - time.time()
+    return f"retry in {_duration(secs)}" if secs >= 60 else "retry in under a minute"
+
+
 def epoch(iso: str) -> float:
     return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
 
@@ -125,7 +166,36 @@ def _pace(percent: float, iso: str | None) -> str:
     return f"\n{icon} {pace}, at the current rate, runs out ~{_duration(abs(diff))} {when} reset"
 
 
-async def fetch(cli: str) -> dict:
+def _rate_limited(r: httpx.Response) -> float:
+    """Note a 429 and return when to try again: as the server says, or doubling from a minute."""
+    global _retry_at, _backoff
+    _backoff = min(max(_backoff * 2, BACKOFF_MIN), BACKOFF_MAX)
+    wait = _backoff
+    try:
+        wait = max(float(r.headers.get("retry-after", "")), 1.0)
+    except ValueError:
+        pass
+    _retry_at = time.time() + wait
+    return _retry_at
+
+
+async def fetch(cli: str, max_age: float = 0.0) -> dict:
+    """The plan usage; a reading up to `max_age` seconds old will do. Raises RateLimited while
+    the endpoint asks to wait."""
+    global _last, _lock, _backoff
+    if _lock is None:
+        _lock = asyncio.Lock()
+    async with _lock:
+        if _last and time.time() - _last[0] <= max_age:
+            return _last[1]
+        if time.time() < _retry_at:
+            raise RateLimited(_retry_at)
+        data = await _get(cli)
+        _last, _backoff = (time.time(), data), 0.0
+        return data
+
+
+async def _get(cli: str) -> dict:
     # After a while with no Claude running (a reboot, a quiet night) the token has expired.
     if _login().get("expiresAt", 0) / 1000 < time.time() + 60:
         await _refresh(cli)
@@ -141,6 +211,8 @@ async def fetch(cli: str) -> dict:
             await _refresh(cli)
     if r.status_code == 401:
         raise Unavailable("the Claude login was rejected; log in again with `claude /login`")
+    if r.status_code == 429:
+        raise RateLimited(_rate_limited(r))
     r.raise_for_status()
     return r.json()
 

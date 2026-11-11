@@ -94,6 +94,7 @@ AGENT_TEXT_LIMIT = 3000  # with the prompt around it, what fits in a Telegram me
 WAKEUP_MESSAGE = "[From the Telegram bot: the alarm you asked for {when} ago rang. You set it to: {reason}]"
 # Keep-alives for an alarm keep the cache this long past it: the alarm loop looks every 15 s.
 WAKEUP_SLACK = 2 * 60
+USAGE_FRESH = 30  # seconds a plan-usage reading still does for /usage
 WAKEUPS_MAX = 3  # asked for or set at once, per conversation
 RESERVE_NAMES = {"session": "5-hour", "weekly_all": "weekly"}
 VERSION_NOTICE_TRIES = 3  # conversations to try the "new version" notice in
@@ -175,6 +176,7 @@ class Bot:
         self._alarm_task: asyncio.Task | None = None
         # The plan usage the alarms last fetched: (time, data or None if unavailable).
         self._plan: tuple[float, dict | None] = (0.0, None)
+        self._usage_later: dict[Key, asyncio.Task] = {}
         self._plan_lock = asyncio.Lock()  # messages arriving during a fetch keep their order
         self._rates = dict(costguard.PLAN_RATES)  # % of each window per equivalent token
         # The reserve _blocked last saw (None: none due), and the reset whose reserve the user spent.
@@ -1258,7 +1260,7 @@ class Bot:
             at, data = self._plan
             if time.time() - at > 60:
                 try:
-                    data = await usage.fetch(self.cfg.cli_path or container.bundled_cli())
+                    data = await usage.fetch(self.cfg.cli_path or container.bundled_cli(), usagelog.FRESH)
                 except Exception as e:
                     log.debug("plan usage not available: %s", e)
                     data = None
@@ -1334,7 +1336,13 @@ class Bot:
 
     async def _usage_text(self) -> str:
         try:
-            return usage.render(await usage.fetch(self.cfg.cli_path or container.bundled_cli()))
+            return usage.render(await usage.fetch(self.cfg.cli_path or container.bundled_cli(), USAGE_FRESH))
+        except usage.RateLimited as e:
+            last = usage.last()
+            if not last:
+                return f"⚠️ Usage not available: {e}"
+            ago = usage.ago(last[0])
+            return f"{usage.render(last[1])}\n\n🕰 Reading from {ago}: {e}"
         except usage.Unavailable as e:
             return f"⚠️ Usage not available: {e}"
         except Exception as e:
@@ -1702,7 +1710,30 @@ class Bot:
         await self._output(key).notice("✅ Logged in to Claude. What was waiting for it goes in a moment.")
 
     async def _cmd_usage(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._output(self._key(update)).notice(await self._usage_text())
+        key = self._key(update)
+        text = await self._usage_text()
+        wait = usage.retry_at() - time.time()
+        if wait > 0 and not usage.fresh(USAGE_FRESH):
+            if key not in self._usage_later:
+                self._usage_later[key] = asyncio.create_task(self._send_usage_later(key))
+            text += "\n\n⏳ I'll send a fresh reading here as soon as the endpoint allows it."
+        await self._output(key).notice(text)
+
+    async def _send_usage_later(self, key: Key) -> None:
+        """/usage while the endpoint was rate-limited: the reading, once it lets the bot ask."""
+        try:
+            while True:
+                await asyncio.sleep(max(usage.retry_at() - time.time(), 0) + 1)
+                try:
+                    await usage.fetch(self.cfg.cli_path or container.bundled_cli(), USAGE_FRESH)
+                except usage.RateLimited:
+                    continue
+                except Exception:
+                    pass  # the reading below says what went wrong
+                break
+            await self._output(key).notice(await self._usage_text())
+        finally:
+            self._usage_later.pop(key, None)
 
     async def _cmd_server(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
