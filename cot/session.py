@@ -59,7 +59,8 @@ APPEND_PROMPT = (
     "often): each check re-sends the whole conversation and costs a full request. Wait for it in "
     "a single command run in the background, which tells you when it ends, e.g. Bash with "
     "run_in_background and `while kill -0 PID 2>/dev/null; do sleep 15; done; tail -n 50 job.log`, "
-    "and end your turn meanwhile; for one that runs for hours, tell the user how to ask you later."
+    "and end your turn meanwhile. For one that runs for long, or when you only need to look again later, "
+    "ask for an alarm with set_alarm (the user approves it) and end your turn: it wakes you with a message."
 )
 # Every API call re-reads the start of the context, so leave out what can't be used from Telegram:
 # the account's claude.ai connectors and the skills for a desktop, browser or terminal UI.
@@ -205,6 +206,7 @@ class Session:
         self.on_limited: Callable[[list[dict], float | None, bool], Awaitable[None]] | None = None
         self.on_login_lost: Callable[[list[dict], bool], Awaitable[None]] | None = None
         self.agents: tg_tools.Agents | None = None  # the other projects' agents, to write to them
+        self.alarm: tg_tools.Alarm | None = None  # asks the user for an alarm that wakes Claude later
         self._sent: set[tuple[tuple[int, ...], str]] = set()  # what send has taken, to spot it again
         self._client: ClaudeSDKClient | None = None
         self._task: asyncio.Task | None = None
@@ -242,11 +244,13 @@ class Session:
             # The SDK's 1 MB default per message is too small for image/PDF reads (base64).
             max_buffer_size=64 * 1024 * 1024,
             mcp_servers={
-                tg_tools.SERVER: tg_tools.make_server(self.out, Path(self.state.cwd), agents=self.agents)
+                tg_tools.SERVER: tg_tools.make_server(
+                    self.out, Path(self.state.cwd), agents=self.agents, alarm=self.alarm
+                )
             },
-            # send_to_agents is allowed here because it asks by itself: permission modes that
-            # approve on their own must not let an agent write to the others unseen.
-            allowed_tools=[tg_tools.SEND_FILE, tg_tools.LIST_AGENTS, tg_tools.SEND_TO_AGENTS],
+            # send_to_agents and set_alarm are allowed here because they ask by themselves: permission
+            # modes that approve on their own must not let an agent write to the others or wake unseen.
+            allowed_tools=[tg_tools.SEND_FILE, tg_tools.LIST_AGENTS, tg_tools.SEND_TO_AGENTS, tg_tools.SET_ALARM],
             system_prompt={"type": "preset", "preset": "claude_code", "append": APPEND_PROMPT},
             settings=json.dumps(CLI_SETTINGS),
             cli_path=self._cli_path,

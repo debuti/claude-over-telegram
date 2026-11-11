@@ -16,6 +16,8 @@ SERVER = "telegram"
 SEND_FILE = f"mcp__{SERVER}__send_file"
 LIST_AGENTS = f"mcp__{SERVER}__list_agents"
 SEND_TO_AGENTS = f"mcp__{SERVER}__send_to_agents"
+SET_ALARM = f"mcp__{SERVER}__set_alarm"
+ALARM_MAX_MINUTES = 24 * 60
 MAX_UPLOAD = 50 * 1024 * 1024  # Bot API limit for files sent by bots
 
 SEND_FILE_SCHEMA = {
@@ -45,6 +47,28 @@ SEND_TO_AGENTS_SCHEMA = {
 }
 
 
+SET_ALARM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": ALARM_MAX_MINUTES,
+            "description": "How long from now to be woken up.",
+        },
+        "reason": {
+            "type": "string",
+            "description": "What to do when it rings (e.g. 'check the test run in job.log'); shown to the user "
+            "and given back to you then.",
+        },
+    },
+    "required": ["minutes", "reason"],
+}
+
+# (minutes, reason) -> what became of it. Raises ValueError if the request makes no sense.
+Alarm = Callable[[int, str], Awaitable[str]]
+
+
 @dataclass
 class Agents:
     """What the bot offers a conversation for reaching the agents of other projects."""
@@ -62,6 +86,7 @@ def make_server(
     out: TelegramOutput,
     cwd: Path,
     agents: Agents | None = None,
+    alarm: Alarm | None = None,
 ):
     @tool(
         "send_file",
@@ -106,5 +131,20 @@ def make_server(
         except ValueError as e:
             return _result(str(e), error=True)
 
+    @tool(
+        "set_alarm",
+        "Ask to be woken up later with a message, instead of checking on something over and over (a test "
+        "run, a build, a deploy). This returns at once: the alarm is set only if the user approves it with "
+        "a button. End your turn after asking; when it rings you get a message with the reason.",
+        SET_ALARM_SCHEMA,
+    )
+    async def set_alarm(args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _result(await alarm(int(args["minutes"]), str(args["reason"])))
+        except (ValueError, TypeError) as e:
+            return _result(str(e), error=True)
+
     tools = [send_file, list_agents, send_to_agents] if agents else [send_file]
+    if alarm:
+        tools.append(set_alarm)
     return create_sdk_mcp_server(SERVER, tools=tools)

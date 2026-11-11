@@ -43,6 +43,9 @@ class ConvState:
     prompt: dict | None = None
     # Messages to other agents waiting for the user's button ({"id", "sender", "to", "text", "html"}).
     agent_sends: list[dict] = field(default_factory=list)
+    # Alarms Claude asked for with set_alarm ({"id", "reason", "minutes", "cwd", "asked_at", "at", "html"}):
+    # "at" is 0 until the user approves it, then the epoch seconds it rings at.
+    wakeups: list[dict] = field(default_factory=list)
 
 
 def _migrate(v: dict) -> dict:

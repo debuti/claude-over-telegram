@@ -277,6 +277,20 @@ project without a topic gets one (in the same chat), and a sleeping conversation
 goes through the usual wake warning. Answers come back
 the same way, with their own button.
 
+## Alarms
+
+Instead of checking on a long test run or build over and over (each check
+re-sends the whole conversation), Claude can ask to be woken up later with a
+`set_alarm` tool: how many minutes from now (up to 24 h) and what to do then.
+You get a button with both, in every permission mode; nothing is set without it.
+Approved, the message shows when it rings and gets a 🔕 Cancel button; denied,
+nothing rings and Claude isn't told (so it costs no turn). The time counts from
+when Claude asked, so one approved late rings at once. When it rings the topic
+shows `⏰ Alarm` and Claude gets a message with its reason, past the wake warning
+(you already approved waking it) but not past a plan limit. Alarms survive
+restarts; a topic moved to another folder since isn't woken. At most 3 per
+conversation, asked for or set.
+
 ## Parallel conversations
 
 Each Telegram topic is an independent conversation, with its own Claude

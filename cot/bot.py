@@ -90,6 +90,9 @@ AGENT_MESSAGE = (
 )
 AGENT_SEND_OUTCOME = "[From the Telegram bot, about your message to other agents: {outcome}. It said:]\n\n{text}"
 AGENT_TEXT_LIMIT = 3000  # with the prompt around it, what fits in a Telegram message once escaped
+# What an alarm Claude asked for (set_alarm) brings it when it rings.
+WAKEUP_MESSAGE = "[From the Telegram bot: the alarm you asked for {when} ago rang. You set it to: {reason}]"
+WAKEUPS_MAX = 3  # asked for or set at once, per conversation
 RESERVE_NAMES = {"session": "5-hour", "weekly_all": "weekly"}
 VERSION_NOTICE_TRIES = 3  # conversations to try the "new version" notice in
 
@@ -115,6 +118,15 @@ MODELS = {
     "claude-sonnet-5-5": "Sonnet 5.5",
     "claude-haiku-5-5": "Haiku 5.5",
 }
+
+
+def _span(minutes: int) -> str:
+    hours, mins = divmod(minutes, 60)
+    return " ".join(part for part in (f"{hours} h" * bool(hours), f"{mins} min" * bool(mins)) if part)
+
+
+def _clock(at: float) -> str:
+    return time.strftime("%H:%M", time.localtime(at))
 
 
 def _inside(path: str, root: Path) -> bool:
@@ -322,6 +334,7 @@ class Bot:
             overview=lambda: self._list_agents(key),
             send=lambda to, text: self._send_to_agents(key, to, text),
         )
+        sess.alarm = lambda minutes, reason: self._ask_wakeup(key, minutes, reason)
         sess.start()
         self.sessions[key] = sess
         if state.pending:
@@ -364,10 +377,13 @@ class Bot:
         while len(self.texts) > KEEP_TEXTS:
             del self.texts[next(iter(self.texts))]
 
-    async def _submit(self, key: Key, text: str, ids: list[int] | None = None, check: bool = True) -> None:
+    async def _submit(
+        self, key: Key, text: str, ids: list[int] | None = None, check: bool = True, hold: bool = True
+    ) -> None:
         """Hand a message to the conversation, unless a warning holds it back first.
 
         check=False delivers without asking: for messages the user already decided about.
+        hold=False skips only the wake warning; plan limits still stop it.
         """
         if not self._assigned(key):
             first = key not in self.no_folder
@@ -388,7 +404,7 @@ class Bot:
             reserve = None if await self._hard_blocked() else self._reserve
             await self._on_limited(key, [{"text": text, "ids": ids or []}], self._plan_resets(), reserve=reserve)
             return
-        if check and self._should_hold(key):
+        if check and hold and self._should_hold(key):
             state.held.append({"text": text, "ids": ids or []})
             self.store.put(key, state)
             await self._wake(key)
@@ -512,6 +528,105 @@ class Bot:
         if any(item["ids"] == [msg_id] for item in self._state(topic).held):
             return "held until the user decides (its conversation is asleep, or a limit stops it)"
         return "delivered"
+
+    async def _ask_wakeup(self, key: Key, minutes: int, reason: str) -> str:
+        """Puts the alarm before the user; it's set only once they approve it."""
+        reason = reason.strip()
+        if not 1 <= minutes <= tg_tools.ALARM_MAX_MINUTES:
+            raise ValueError(f"minutes must be between 1 and {tg_tools.ALARM_MAX_MINUTES}.")
+        if not reason or len(esc(reason)) > AGENT_TEXT_LIMIT:
+            raise ValueError(f"The reason must have some text and fit in {AGENT_TEXT_LIMIT} characters.")
+        state = self._state(key)
+        if len(state.wakeups) >= WAKEUPS_MAX:
+            raise ValueError(f"There are already {WAKEUPS_MAX} alarms asked for or set here; wait for one to ring.")
+        out = self._output(key)
+        await out.flush()
+        now = time.time()
+        html = (
+            f"⏰ <b>Claude asks to be woken up in {_span(minutes)}</b> (at {_clock(now + minutes * 60)})\n"
+            f"<pre>{esc(reason)}</pre>"
+        )
+        wake_id = secrets.token_hex(6)
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Allow", callback_data=f"wakeup:{wake_id}:{permissions.ALLOW}"),
+                    InlineKeyboardButton("❌ Deny", callback_data=f"wakeup:{wake_id}:{permissions.DENY}"),
+                ]
+            ]
+        )
+        if await out.send_html(html, reply_markup=keyboard) is None:
+            raise ValueError("The request couldn't be shown to the user: no alarm is set.")
+        state = self._state(key)
+        state.wakeups.append(
+            {
+                "id": wake_id,
+                "reason": reason,
+                "minutes": minutes,
+                "cwd": state.cwd,
+                "asked_at": now,
+                "at": 0.0,
+                "html": html,
+            }
+        )
+        self.store.put(key, state)
+        return (
+            "Asked the user. If they approve it, a message wakes you when it rings; if they refuse it, "
+            "nothing rings and you aren't told. End your turn now; don't check meanwhile."
+        )
+
+    async def _on_wakeup(self, key: Key, query, rest: str) -> None:
+        """The buttons of an alarm: allow or deny it while asked, cancel it once set."""
+        wake_id, _, choice = rest.partition(":")
+        state = self._state(key)
+        item = next((i for i in state.wakeups if i["id"] == wake_id), None)
+        if item is None:
+            await query.answer("This alarm is no longer active")
+            await query.edit_message_reply_markup(None)
+            return
+        await query.answer()
+        keyboard = None
+        if choice == permissions.ALLOW and not item["at"]:
+            # Counted from when Claude asked: approved late, it rings at once.
+            item["at"] = max(item["asked_at"] + item["minutes"] * 60, time.time())
+            note = f"✅ Allowed: rings at {_clock(item['at'])}"
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔕 Cancel", callback_data=f"wakeup:{wake_id}:cancel")]]
+            )
+        elif choice == "cancel":
+            state.wakeups.remove(item)
+            note = "🔕 Cancelled"
+        elif choice == permissions.DENY and not item["at"]:
+            state.wakeups.remove(item)
+            note = permissions.OUTCOME[permissions.DENY]
+        else:
+            return
+        self.store.put(key, state)
+        try:
+            await query.edit_message_text(
+                f"{item['html']}\n\n<b>{note}</b>"[:4096], parse_mode="HTML", reply_markup=keyboard
+            )
+        except TelegramError as e:
+            log.warning("could not update the alarm's message: %s", e)
+
+    async def _check_wakeups(self, key: Key, state: ConvState) -> None:
+        """Rings the approved alarms that are due: each reaches Claude as a message."""
+        now = time.time()
+        due = [i for i in state.wakeups if i["at"] and i["at"] <= now]
+        if not due:
+            return
+        state.wakeups = [i for i in state.wakeups if i not in due]
+        self.store.put(key, state)
+        for item in due:
+            out = self._output(key)
+            if item.get("cwd") != state.cwd or not self._assigned(key):
+                await out.notice(f"🔕 An alarm for {Path(item.get('cwd', '')).name} didn't ring: the topic moved on")
+                continue
+            msg_id = await out.send_html(f"⏰ <b>Alarm</b>\n{esc(item['reason'])}")
+            when = _span(max(1, round((now - item["asked_at"]) / 60)))
+            text = WAKEUP_MESSAGE.format(when=when, reason=item["reason"])
+            # The user approved waking it: no wake warning, but plan limits still hold it.
+            await self._submit(key, text, [msg_id] if msg_id else None, hold=False)
 
     def _should_hold(self, key: Key) -> bool:
         """A conversation asleep with its cache gone: where its next message goes is asked.
@@ -957,6 +1072,7 @@ class Bot:
             for key, state in self.store.items():
                 try:
                     await self._check_login(key, state)
+                    await self._check_wakeups(key, state)
                     await self._check_limit(key, state)
                     if self.cfg.topic_titles:
                         await self._check_title(key, state)
@@ -1586,6 +1702,8 @@ class Bot:
                 await query.edit_message_reply_markup(None)
         elif kind == "agent":
             await self._on_agent_send(key, query, rest)
+        elif kind == "wakeup":
+            await self._on_wakeup(key, query, rest)
         elif kind == "cwd":
             await query.answer()
             await query.edit_message_reply_markup(None)
