@@ -10,6 +10,7 @@ import getpass
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -56,6 +57,12 @@ def stop_claude(name: str) -> None:
     _docker("exec", name, "pkill", "-x", "claude", capture_output=True, check=False)
 
 
+def agent_name(label: str, chat_id: int, thread_id: int | None) -> str:
+    """cot-<topic or folder>-<topic id>: tells conversations apart in docker ps."""
+    slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")[:40] or "chat"
+    return f"cot-{slug}-{thread_id or abs(chat_id)}"
+
+
 def any_running() -> bool:
     """True while an agent container runs, or if that can't be told."""
     ps = _docker("ps", "-q", "--filter", "label=cot.agent=1", capture_output=True, check=False)
@@ -92,8 +99,9 @@ def bundled_cli() -> str:
     return str(Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude")
 
 
-def prepare(cfg: Config) -> tuple[str, dict[str, str]]:
-    """Image ready and leftovers gone; returns the CLI path and env to give the SDK."""
+def prepare(cfg: Config, keep: set[str] = frozenset()) -> tuple[str, dict[str, str]]:
+    """Image ready and leftovers gone, but for those in keep (waiting for an alarm);
+    returns the CLI path and env to give the SDK."""
     if not shutil.which("docker"):
         raise SystemExit("SANDBOX_DOCKER is on but docker is not installed (or set SANDBOX_DOCKER=false)")
     try:
@@ -106,7 +114,10 @@ def prepare(cfg: Config) -> tuple[str, dict[str, str]]:
     # Containers whose work is done; those still running something are kept.
     names = _docker("ps", "-a", "--filter", "label=cot.agent=1", "--format", "{{.Names}}", capture_output=True)
     for name in names.stdout.split():
-        reap(name)
+        if name in keep:
+            stop_claude(name)
+        else:
+            reap(name)
 
     claude = cfg.cli_path or bundled_cli()
     # The SDK checks the CLI version on every connect: a whole container each time.

@@ -491,3 +491,23 @@ async def test_sleep_leaves_it_up_if_a_message_waits():
     assert not await sess.sleep(grace=0.05)
     assert sess.connected
     await sess.close()
+
+
+async def test_with_an_alarm_set_the_container_is_never_removed(monkeypatch):
+    calls = []
+    monkeypatch.setattr(session_mod.container, "reap", lambda name: calls.append(("reap", name)))
+    monkeypatch.setattr(session_mod.container, "stop_claude", lambda name: calls.append(("stop", name)))
+    state = ConvState(cwd="/tmp", session_id="sess-1", wakeups=[{"id": "a", "at": time.time() + 600}])
+    sess = make(state)
+    sess._cli_env = {"COT_IMAGE": "x"}
+    await sess.send("hi")
+    await until(lambda: sess.entries)
+    assert await sess.sleep(grace=1)
+    assert [kind for kind, _ in calls] == ["stop"]
+    state.wakeups.clear()  # rung: from then on it goes as usual
+    await sess.send("again")
+    await until(lambda: len(sess.entries) == 2)
+    await sess._end_process()
+    assert [kind for kind, _ in calls] == ["stop", "reap"]
+    sess._cli_env = {}
+    await sess.close()

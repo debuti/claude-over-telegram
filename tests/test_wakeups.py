@@ -196,6 +196,7 @@ def test_allowed_it_ends_claudes_process(bot):
 
     class Sess:
         connected = True
+        container = "cot-me-10"
 
         async def sleep(self):
             slept.append(True)
@@ -214,6 +215,13 @@ def test_allowed_it_ends_claudes_process(bot):
 
     asyncio.run(go())
     assert slept and "ended" in bot.posted[-1]
+    assert bot.store.get(ME).wakeups[0]["container"] == "cot-me-10"
+
+
+def test_without_a_process_its_container_is_still_known(bot):
+    ask(bot)
+    press(bot, button(bot.asked[0]))
+    assert bot.store.get(ME).wakeups[0]["container"] == "cot-me-10"
 
 
 def test_denied_claude_is_left_alone(bot):
@@ -230,3 +238,15 @@ def test_denied_claude_is_left_alone(bot):
     ask(bot)
     press(bot, button(bot.asked[0], 1))
     assert not bot._sleeping
+
+
+def test_the_topic_shows_an_alarm_clock_while_it_waits(bot):
+    from cot import titles
+
+    bot.cfg.compact_at = 0
+    state = bot.store.get(ME)
+    state.title = "me"
+    assert bot._title(ME, state).startswith(titles.ASLEEP)
+    ask(bot)
+    press(bot, button(bot.asked[0]))
+    assert bot._title(ME, bot.store.get(ME)).startswith(titles.ALARM)

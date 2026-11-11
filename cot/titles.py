@@ -4,7 +4,7 @@ import re
 
 KEYCAPS = ("0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟")
 WORKING, ASKING, LOGIN, LIMITED, IDLE, ASLEEP = "⚙️", "❓", "🔑", "⏸", "🟢", "💤"
-COLD, QUEUED = "🧊", "📨"
+COLD, QUEUED, ALARM = "🧊", "📨", "⏰"  # ALARM: asleep until an alarm it asked for
 # Telegram posts a service message per rename, so the cache's time moves in steps (minutes), never
 # overstating what's left.
 CACHE_STEPS = (90, 60, 45, 30, 15, 10, 5, 2, 1)
@@ -15,7 +15,7 @@ LEGEND = (
     f"Topic names show how each conversation stands, e.g. {WORKING}·7️⃣·30m·web·{QUEUED}2\n"
     f"{WORKING} working, {ASKING} waiting for your permission, {LOGIN} waiting for /login, "
     f"{LIMITED} stopped by a plan limit, "
-    f"{IDLE} awake, waiting for you, {ASLEEP} asleep\n"
+    f"{IDLE} awake, waiting for you, {ASLEEP} asleep, {ALARM} asleep until its alarm\n"
     f"{KEYCAPS[0]}…{KEYCAPS[10]} room left until it compacts: 7️⃣ is 70%\n"
     f"30m until the prompt cache is lost, at least, keep-alives included; {COLD} gone: the next message re-sends all; "
     "neither just after compacting: there's nothing to lose\n"
@@ -24,7 +24,8 @@ LEGEND = (
 )
 
 _STATUS_FIELD = re.compile(
-    "|".join(map(re.escape, (WORKING, ASKING, LOGIN, LIMITED, IDLE, ASLEEP, COLD, *KEYCAPS))) + rf"|>?\d+m|{QUEUED}\d+"
+    "|".join(map(re.escape, (WORKING, ASKING, LOGIN, LIMITED, IDLE, ASLEEP, ALARM, COLD, *KEYCAPS)))
+    + rf"|>?\d+m|{QUEUED}\d+"
 )
 
 

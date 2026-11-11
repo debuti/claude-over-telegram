@@ -286,8 +286,11 @@ You get a button with both, in every permission mode; nothing is set without it.
 Approved, the message shows when it rings and gets a 🔕 Cancel button, and the
 bot ends that conversation's Claude process so nothing of it keeps polling: the
 turn running gets a minute to end, then it's interrupted (not if you've written
-to it meanwhile). Jobs started detached (`setsid nohup`) go on, and the next
-message, or the alarm, resumes the conversation; denied,
+to it meanwhile). Only the process: while an alarm is set its container is
+never removed (not when Claude sleeps, nor when the bot restarts), so the tests
+it waits for go on, and the topic's name shows ⏰ instead of 💤. Jobs started
+detached (`setsid nohup`) go on, and the next message, or the alarm, resumes
+the conversation; denied,
 nothing rings and Claude isn't told (so it costs no turn). The time counts from
 when Claude asked, so one approved late rings at once. When it rings the topic
 shows `⏰ Alarm` and Claude gets a message with its reason, past the wake warning

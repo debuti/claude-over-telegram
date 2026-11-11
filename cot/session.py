@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -270,9 +269,24 @@ class Session:
 
     def _container_name(self) -> str:
         """cot-<topic or folder>-<topic id>: tells conversations apart in docker ps."""
-        label = self.state.title or Path(self.state.cwd).name
-        slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")[:40] or "chat"
-        return f"cot-{slug}-{self.out.thread_id or abs(self.out.chat_id)}"
+        return container.agent_name(self.state.title or Path(self.state.cwd).name, self.out.chat_id, self.out.thread_id)
+
+    @property
+    def container(self) -> str:
+        """The container this conversation's Claude runs (or would run) in."""
+        return self._running_as or self._container_name()
+
+    @property
+    def alarm_set(self) -> bool:
+        """An approved alarm will wake it: what runs in its container (the tests it waits for) must live on."""
+        return any(w.get("at") for w in self.state.wakeups)
+
+    async def _end_process(self) -> None:
+        """Claude's process goes; its container too, unless an alarm is set or something runs in it."""
+        await self._disconnect()
+        if self._in_docker:
+            end = container.stop_claude if self.alarm_set else container.reap
+            await asyncio.to_thread(end, self.container)
 
     async def _connect(self) -> None:
         client = ClaudeSDKClient(self._options())
@@ -378,9 +392,7 @@ class Session:
             return True
         if self.pending:
             return False
-        await self._disconnect()
-        if self._in_docker:
-            await asyncio.to_thread(container.reap, self._running_as or self._container_name())
+        await self._end_process()
         return True
 
     async def set_model(self, model: str | None) -> None:
@@ -414,7 +426,7 @@ class Session:
                 pass
         await self._disconnect()
         if self._in_docker:
-            await asyncio.to_thread(container.stop_claude, self._running_as or self._container_name())
+            await asyncio.to_thread(container.stop_claude, self.container)
 
     @property
     def _in_docker(self) -> bool:
@@ -462,9 +474,7 @@ class Session:
                     finally:
                         self.busy = False
                         self._stopping = False
-                await self._disconnect()
-                if self._in_docker:
-                    await asyncio.to_thread(container.reap, self._running_as or self._container_name())
+                await self._end_process()
                 continue
             items = await self._gather(item)
             if not items:  # dropped by /stop while gathering

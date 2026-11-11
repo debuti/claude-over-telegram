@@ -6,6 +6,7 @@ from pathlib import Path
 
 from . import config, container
 from .bot import Bot
+from .store import Store
 
 
 def main() -> None:
@@ -40,7 +41,14 @@ def main() -> None:
     except BlockingIOError:
         raise SystemExit("another instance is already running") from None
 
-    cli_path, cli_env = container.prepare(cfg) if cfg.docker else (cfg.cli_path, {})
+    # Containers an approved alarm waits on (its tests may still run there) are never removed.
+    keep = {
+        w["container"]
+        for _, state in Store(cfg.state_dir / "sessions.json").items()
+        for w in state.wakeups
+        if w.get("at") and w.get("container")
+    }
+    cli_path, cli_env = container.prepare(cfg, keep) if cfg.docker else (cfg.cli_path, {})
     Bot(cfg, cli_path, cli_env).run()
 
 

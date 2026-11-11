@@ -591,6 +591,10 @@ class Bot:
         if choice == permissions.ALLOW and not item["at"]:
             # Counted from when Claude asked: approved late, it rings at once.
             item["at"] = max(item["asked_at"] + item["minutes"] * 60, time.time())
+            # Kept while it's set, even across restarts: the job it waits for may run there.
+            sess = self.sessions.get(key)
+            label = state.title or Path(state.cwd).name
+            item["container"] = sess.container if sess else container.agent_name(label, *key)
             note = f"✅ Allowed: rings at {_clock(item['at'])}"
             keyboard = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("🔕 Cancel", callback_data=f"wakeup:{wake_id}:cancel")]]
@@ -619,7 +623,7 @@ class Bot:
     async def _put_to_sleep(self, key: Key, sess: Session) -> None:
         try:
             if await sess.sleep():
-                await self._output(key).notice("💤 Claude's process ended until the alarm rings")
+                await self._output(key).notice("⏰ Claude's process ended until the alarm rings; its container stays")
         except Exception:
             log.exception("putting Claude to sleep for its alarm failed")
 
@@ -1133,8 +1137,10 @@ class Bot:
             status = titles.LIMITED
         elif sess and sess.pending:
             status = titles.WORKING
+        elif sess and sess.connected:
+            status = titles.IDLE
         else:
-            status = titles.IDLE if sess and sess.connected else titles.ASLEEP
+            status = titles.ALARM if any(w.get("at") for w in state.wakeups) else titles.ASLEEP
         room = ""
         if self.cfg.compact_at:  # the same size Session._needs_compact goes by
             room = titles.room(state.context_tokens, max(self.cfg.compact_at, 2 * state.after_compact))
