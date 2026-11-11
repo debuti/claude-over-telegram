@@ -1151,7 +1151,8 @@ class Bot:
         # Just compacted, the old context's cache is no use: until the next answer there's none to lose.
         cache = titles.cache(self._cache_lasts(state)) if state.last_api_at and state.context_tokens else ""
         queued = (sess.queued if sess else len(state.pending)) + len(state.held)
-        return titles.compose(state.title, status, room, cache, queued)
+        model = titles.model(state.model or state.last_model)
+        return titles.compose(state.title, status, room, cache, queued, model)
 
     def _cache_lasts(self, state: ConvState) -> float:
         """Seconds until this conversation's cache is really lost, with the keep-alives _check_alarm

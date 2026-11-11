@@ -63,3 +63,13 @@ def test_legend_explains_every_field():
     states = (titles.WORKING, titles.ASKING, titles.LIMITED, titles.IDLE, titles.ASLEEP)
     for field in (*states, titles.COLD, titles.QUEUED, *titles.KEYCAPS[::10]):
         assert field in titles.LEGEND
+
+
+def test_the_model_goes_after_the_name():
+    assert titles.model("claude-opus-5-5") == "🧐"
+    assert titles.model("haiku") == "😵‍💫"
+    assert titles.model(None) == titles.model("gpt") == ""
+    assert titles.compose("web", "⚙️", model="🤓", queued=2) == "⚙️·web·🤓·📨2"
+    assert titles.plain("🟢·web·🤓") == "web"
+    for icon in titles.MODELS.values():
+        assert icon in titles.LEGEND

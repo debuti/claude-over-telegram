@@ -120,7 +120,7 @@ All settings live in `.env` next to the code (see `.env.example`):
 | `DOCKER_LIMITS`    | (empty)    | Per-folder limits, `folder=cpus[:memory],…` (e.g. `web=4:6g`); applied to running containers too |
 | `DOCKER_MOUNTS`    | (empty)    | Extra host paths containers see, read-only unless `:rw`: `folder=path[+path],…`, `*` for every folder (e.g. `*=~/tools+~/shared:rw,web=~/workspace`); containers are recreated to add them once nothing runs in them |
 | `DOCKER_PATH`      | (empty)    | Directories put first on the containers' PATH, `:`-separated (e.g. `~/tools/node/bin:~/tools/jdk/bin`) |
-| `DOCKER_EXCLUDE`   | (empty)    | Comma-separated folders whose conversations run on the host, outside Docker |
+| `DOCKER_EXCLUDE`   | (empty)    | Comma-separated folders whose conversations run on the host, outside Docker; the workdir's own name puts the General chat (which works in the workdir) there |
 | `SANDBOX_BASH`     | `false`    | Without Docker: confine Bash writes to the workdir too          |
 | `CLAUDE_CLI_PATH`  | (bundled)  | Use this `claude` binary instead of the one bundled with the SDK |
 | `STATE_DIR`        | `./state`  | Where sessions, lock, pid and log files live                    |
@@ -221,11 +221,12 @@ If Claude's login expires and can't be refreshed, it's the same: nothing reaches
 nothing is lost. `/login` renews it from Telegram (open the address it gives, send back the
 code that page shows), and what waited goes on by itself; so it does after a login on the machine.
 
-Each topic's name shows how it stands, e.g. `⚙️·7️⃣·30m·web·📨2`: ⚙️ working, ❓ waiting for
+Each topic's name shows how it stands, e.g. `⚙️·7️⃣·30m·web·🧐·📨2`: ⚙️ working, ❓ waiting for
 your permission, 🔑 waiting for `/login`, ⏸ stopped by a plan limit, 🟢 awake and waiting for you or 💤 asleep; tenths of the room left
 until it compacts, `7️⃣` being 70%; time until the prompt cache is really lost, counting the keep-alives
 that conversation will get (none below `WAKE_SMALL_TOKENS` or during a plan limit), in steps, or
-🧊 once gone; its name; and messages waiting. It changes at most every 15 seconds, and the
+🧊 once gone; its name; the model (😵‍💫 Haiku, 🙂 Sonnet, 🧐 Opus, 🤓 Fable: the one picked
+with `/model`, or the one that last answered); and messages waiting. It changes at most every 15 seconds, and the
 bot deletes Telegram's rename notices (it needs to be an admin who can manage topics and
 delete messages). A topic from before the bot knew names shows this once you write in it:
 Telegram can't be asked for the name, and it's taken from the topic's creation, so one

@@ -759,7 +759,7 @@ class Session:
                 if self._measure_compacted:
                     self.state.after_compact, self._measure_compacted = self.state.context_tokens, False
             if not nested and msg.model and not msg.model.startswith("<"):
-                self.model = msg.model
+                self.model = self.state.last_model = msg.model
             for block in msg.content:
                 if self._keepalive:
                     continue

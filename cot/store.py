@@ -25,6 +25,8 @@ class ConvState:
     # Epoch seconds of the main thread's last API call: the prompt cache lives on from it.
     # 0 in state from before 2.13 (then the transcript's last write stands in).
     last_api_at: float = 0.0
+    # The model that answered last (what "default" turned out to be), for the topic's name.
+    last_model: str | None = None
     title: str | None = None  # topic name, known when the topic is created or renamed
     shown_title: str | None = None  # what the bot last set the topic's name to, status included
     # Messages not yet handed to Claude ({"text", "ids"}), so a restart doesn't lose them.

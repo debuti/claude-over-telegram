@@ -5,6 +5,8 @@ import re
 KEYCAPS = ("0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟")
 WORKING, ASKING, LOGIN, LIMITED, IDLE, ASLEEP = "⚙️", "❓", "🔑", "⏸", "🟢", "💤"
 COLD, QUEUED, ALARM = "🧊", "📨", "⏰"  # ALARM: asleep until an alarm it asked for
+# The model answering, after the name: by family, whatever the version.
+MODELS = {"haiku": "😵‍💫", "sonnet": "🙂", "opus": "🧐", "fable": "🤓"}
 # Telegram posts a service message per rename, so the cache's time moves in steps (minutes), never
 # overstating what's left.
 CACHE_STEPS = (90, 60, 45, 30, 15, 10, 5, 2, 1)
@@ -12,7 +14,7 @@ OVER_FROM = 45  # from this step up there can be a good deal more than it says
 MAX_LENGTH = 128  # Telegram's limit for a topic's name
 
 LEGEND = (
-    f"Topic names show how each conversation stands, e.g. {WORKING}·7️⃣·30m·web·{QUEUED}2\n"
+    f"Topic names show how each conversation stands, e.g. {WORKING}·7️⃣·30m·web·{MODELS['opus']}·{QUEUED}2\n"
     f"{WORKING} working, {ASKING} waiting for your permission, {LOGIN} waiting for /login, "
     f"{LIMITED} stopped by a plan limit, "
     f"{IDLE} awake, waiting for you, {ASLEEP} asleep, {ALARM} asleep until its alarm\n"
@@ -20,11 +22,12 @@ LEGEND = (
     f"30m until the prompt cache is lost, at least, keep-alives included; {COLD} gone: the next message re-sends all; "
     "neither just after compacting: there's nothing to lose\n"
     "web the topic's name\n"
+    f"{MODELS['haiku']} Haiku, {MODELS['sonnet']} Sonnet, {MODELS['opus']} Opus, {MODELS['fable']} Fable: the model\n"
     f"{QUEUED}2 messages waiting for Claude"
 )
 
 _STATUS_FIELD = re.compile(
-    "|".join(map(re.escape, (WORKING, ASKING, LOGIN, LIMITED, IDLE, ASLEEP, ALARM, COLD, *KEYCAPS)))
+    "|".join(map(re.escape, (WORKING, ASKING, LOGIN, LIMITED, IDLE, ASLEEP, ALARM, COLD, *KEYCAPS, *MODELS.values())))
     + rf"|>?\d+m|{QUEUED}\d+"
 )
 
@@ -41,8 +44,13 @@ def cache(left: float) -> str:
     return f">{step}m" if step >= OVER_FROM else f"{step}m"
 
 
-def compose(name: str, status: str = "", room: str = "", cache: str = "", queued: int = 0) -> str:
-    tail = [f"{QUEUED}{queued}"] if queued else []
+def model(model_id: str | None) -> str:
+    """The icon of a model id or alias ("claude-opus-5-5", "sonnet"); "" if unknown."""
+    return next((icon for family, icon in MODELS.items() if family in (model_id or "").lower()), "")
+
+
+def compose(name: str, status: str = "", room: str = "", cache: str = "", queued: int = 0, model: str = "") -> str:
+    tail = [field for field in (model, f"{QUEUED}{queued}" if queued else "") if field]
     head = [field for field in (status, room, cache) if field]
     # The name gives way: what's around it is what changes.
     fits = MAX_LENGTH - len("·".join([*head, *tail])) - 1
