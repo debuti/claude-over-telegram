@@ -69,6 +69,7 @@ COMMANDS = [
     ("tools", "how much tool activity to show"),
     ("mode", "permission mode"),
     ("model", "switch model"),
+    ("catchup", "go on by itself when a plan limit lifts"),
     ("status", "what's going on"),
     ("cost", "estimated cost of this conversation"),
     ("usage", "plan usage limits (5-hour and weekly)"),
@@ -113,6 +114,14 @@ CONTINUE_PROMPT = (
     "[From the Telegram bot: a plan limit cut your last turn short and has now lifted. "
     "Carry on with what you were doing.]"
 )
+
+# /catchup's choices, as stored in ConvState.catchup.
+CATCHUP = {
+    "": "ask before going on",
+    "send": "go on by itself",
+    "compact": "compact, then go on by itself",
+}
+CATCHUP_BUTTONS = {"send": "⏰ Go on by itself", "compact": "🗜 Compact, then go on", "": "❓ Ask me"}
 
 MODELS = {
     "claude-fable-5-2": "Fable 5.2",
@@ -214,6 +223,7 @@ class Bot:
         self.app.add_handler(CommandHandler("mode", self._cmd_mode, filters=allowed))
         self.app.add_handler(CommandHandler("stop", self._cmd_stop, filters=allowed))
         self.app.add_handler(CommandHandler("model", self._cmd_model, filters=allowed))
+        self.app.add_handler(CommandHandler("catchup", self._cmd_catchup, filters=allowed))
         self.app.add_handler(CommandHandler("status", self._cmd_status, filters=allowed))
         self.app.add_handler(CommandHandler("cost", self._cmd_cost, filters=allowed))
         self.app.add_handler(CommandHandler("usage", self._cmd_usage, filters=allowed))
@@ -673,8 +683,10 @@ class Bot:
         """A plan limit stops Claude, or its reserve: messages wait, in order, until _check_limit sees it gone."""
         state = self._state(key)
         state.held = items + state.held
-        if not resets and not state.limit_until:  # going on by itself hit it again, with no time to wait for
-            state.limit_auto = ""
+        if not resets and not state.limit_until and state.limit_auto:
+            state.limit_auto = ""  # going on by itself hit it again, with no time to wait for
+        elif state.catchup and not state.limit_auto:
+            state.limit_auto = state.catchup
         state.limit_until = max(state.limit_until, resets or 0.0) or time.time() + LIMIT_RETRY
         state.limit_cut = state.limit_cut or cut
         self.store.put(key, state)
@@ -1640,6 +1652,39 @@ class Bot:
             return
         await sess.out.notice(f"🧠 Model: {model} (applies from the next message)")
 
+    async def _cmd_catchup(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/catchup [auto|compact|ask]: whether the conversation goes on by itself when a plan limit lifts."""
+        key = self._key(update)
+        if not await self._ready(key):
+            return
+        if ctx.args:
+            await self._set_catchup(key, ctx.args[0].lower())
+            return
+        current = self._state(key).catchup
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    f"{'● ' if value == current else ''}{CATCHUP_BUTTONS[value]}", callback_data=f"catchup:{arg}"
+                )
+            ]
+            for arg, value in (("auto", "send"), ("compact", "compact"), ("ask", ""))
+        ]
+        await self._output(key).send_html(
+            f"After a plan limit: <b>{CATCHUP[current]}</b>", reply_markup=InlineKeyboardMarkup(buttons)
+        )
+
+    async def _set_catchup(self, key: Key, arg: str) -> None:
+        value = {"auto": "send", "on": "send", "compact": "compact", "ask": "", "off": "", "no": ""}.get(arg)
+        if value is None:
+            await self._output(key).notice("Unknown choice. Options: auto, compact, ask")
+            return
+        state = self._state(key)
+        state.catchup = value
+        if state.limit_until:  # a limit already stops it: this one too
+            state.limit_auto = value
+        self.store.put(key, state)
+        await self._output(key).notice(f"⏰ After a plan limit: {CATCHUP[value]}")
+
     async def _cmd_status(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
         sess = self.sessions.get(key)
@@ -1663,6 +1708,7 @@ class Bot:
             f"model: {(sess and sess.model) or state.model or 'default'}",
             f"state: {activity}" + (f", {queued} queued" if queued else ""),
             f"tools: {state.tools}",
+            f"after a plan limit: {CATCHUP[state.catchup]}",
         ]
         try:
             context = await sess.context_usage() if sess else None
@@ -1771,7 +1817,7 @@ class Bot:
         elif kind == "wake":  # the wake picker of 2.12 and before
             await query.answer("This prompt has expired")
             await query.edit_message_reply_markup(None)
-        elif kind in ("tools", "model", "mode", "resume", "guard") and not await self._ready(key):
+        elif kind in ("tools", "model", "mode", "resume", "guard", "catchup") and not await self._ready(key):
             await query.answer()
         elif kind == "resume":
             await query.answer()
@@ -1788,6 +1834,10 @@ class Bot:
             await query.answer()
             await query.edit_message_reply_markup(None)
             await self._set_model(self._session(key), rest)
+        elif kind == "catchup":
+            await query.answer()
+            await query.edit_message_reply_markup(None)
+            await self._set_catchup(key, rest)
         elif kind == "mode":
             await query.answer()
             await query.edit_message_reply_markup(None)

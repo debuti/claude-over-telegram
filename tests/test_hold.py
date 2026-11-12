@@ -744,3 +744,27 @@ async def test_the_reserve_keeps_the_cache_warm_past_keepalive_hours(reserving):
     reserving.cfg.limit_reserve, reserving._reserve = False, None  # without it the wait for the limit sends none
     await reserving._check_alarm(KEY, state)
     assert pings == [True]
+
+
+async def test_catchup_goes_on_after_every_limit_without_asking(limit):
+    state = limit.store.get(KEY)
+    await limit._set_catchup(KEY, "auto")
+    assert state.catchup == "send"
+    await limit._on_limited(KEY, [], 1.0, cut=True)
+    assert state.limit_auto == "send" and state.prompt is None and "as you asked" in limit.out.notices[-1]
+    limit.limit = False
+    await limit._check_limit(KEY, state)
+    assert limit.delivered == [CONTINUE_PROMPT]
+    state.limit_auto, limit.limit = "", True  # the turn got through; a later limit goes on too
+    await limit._on_limited(KEY, [], 2.0, cut=True)
+    assert state.limit_auto == "send" and state.prompt is None
+
+
+async def test_catchup_set_during_a_limit_applies_to_it(limit):
+    await limit._on_limited(KEY, [], 1.0, cut=True)
+    state = limit.store.get(KEY)
+    assert state.limit_auto == ""
+    await limit._set_catchup(KEY, "compact")
+    assert state.limit_auto == "compact"
+    await limit._set_catchup(KEY, "ask")
+    assert state.catchup == state.limit_auto == ""

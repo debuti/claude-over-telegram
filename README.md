@@ -215,6 +215,9 @@ If the limit cut Claude's work short, the same question offers to carry on with 
 You can answer in advance: the buttons on the limit's notice make the bot go on by itself
 when it lifts, also through any further limit, until a turn gets through (a permission
 Claude asks for still waits for you).
+`/catchup auto` (or `compact`, compacting first) answers it for every limit of that
+conversation, e.g. before a long task that will use up the 5-hour window; `/catchup ask`
+(the default) goes back to asking.
 All this survives a restart too, and `/stop` drops it.
 
 If Claude's login expires and can't be refreshed, it's the same: nothing reaches Claude and
@@ -244,6 +247,7 @@ turns it off.
 | `/tools`   | Tool activity: hidden, calls, or calls with output   |
 | `/mode`    | Permission mode (default, acceptEdits, plan, auto…)  |
 | `/model`   | Switch model                                         |
+| `/catchup` | Go on by itself when a plan limit lifts: `auto`, `compact` or `ask` (default) |
 | `/status`  | Workdir, mode, model, activity, context usage        |
 | `/cost`    | Estimated cost of the conversation                   |
 | `/usage`   | Plan usage: 5-hour and weekly limits                 |
