@@ -8,6 +8,7 @@ more forgiving to produce than MarkdownV2. Messages are split below Telegram's
 import html
 import json
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -44,21 +45,81 @@ def _inline(line: str) -> str:
     return "".join(out)
 
 
+TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+TABLE_SEP = re.compile(r"^:?-+:?$")
+TABLE_WIDTH = 40  # monospace columns a phone shows without wrapping
+
+
+def _cells(line: str) -> list[str]:
+    line = line.strip()[1:-1]
+    return [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", line)]
+
+
+def _plain(cell: str) -> str:
+    """A cell's Markdown inline syntax stripped, for monospace alignment."""
+    cell = LINK.sub(r"\1", cell)
+    cell = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: m[1] or m[2], cell)
+    cell = re.sub(r"`([^`]+)`", r"\1", cell)
+    cell = STRIKE.sub(r"\1", cell)
+    return ITALIC.sub(r"\1", cell)
+
+
+def _width(s: str) -> int:
+    w = 0
+    for ch in s:
+        if unicodedata.combining(ch) or ch in "‍︎️":
+            continue
+        w += 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+    return w
+
+
+def _table(lines: list[str]) -> str:
+    """A Markdown table -> aligned <pre> if it fits a phone, else one card per row."""
+    rows = [_cells(line) for line in lines]
+    rows = [r for r in rows if not (any(r) and all(TABLE_SEP.match(c) for c in r if c))] or [[""]]
+    n = max(len(r) for r in rows)
+    rows = [r + [""] * (n - len(r)) for r in rows]
+    plain = [[_plain(c) for c in r] for r in rows]
+    widths = [max(_width(r[i]) for r in plain) for i in range(n)]
+    if sum(widths) + 2 * (n - 1) <= TABLE_WIDTH or len(rows) < 2:
+        pad = lambda c, i: c + " " * (widths[i] - _width(c))  # noqa: E731
+        out = ["  ".join(pad(c, i) for i, c in enumerate(r)).rstrip() for r in plain]
+        out.insert(1, "  ".join("─" * w for w in widths))
+        return f"<pre>{esc(chr(10).join(out))}</pre>"
+    head = rows[0]  # too wide: header cells become each row's labels
+    cards = []
+    for r in rows[1:]:
+        card = [f"<b>{_inline(r[0])}</b>"] if r[0] else []
+        card += [f"{_inline(h)}: {_inline(c)}" if h else _inline(c) for h, c in zip(head[1:], r[1:], strict=True) if c]
+        cards.append("\n".join(card))
+    return "\n\n".join(cards)
+
+
 def _text_units(text: str) -> list[str]:
-    """Prose -> one HTML unit per paragraph; Markdown tables become <pre>."""
+    """Prose -> one HTML unit per paragraph; Markdown tables are laid out for a phone."""
     units = []
     for para in re.split(r"\n\s*\n", text.strip("\n")):
-        lines = para.split("\n")
-        if all(line.lstrip().startswith("|") for line in lines):
-            units.append(f"<pre>{esc(para)}</pre>")
-            continue
-        rendered = []
-        for line in lines:
+        rendered, lines = [], para.split("\n")
+        i = 0
+        while i < len(lines):
+            j = i
+            while j < len(lines) and TABLE_ROW.match(lines[j]):
+                j += 1
+            if j - i >= 2:  # a table, even with no blank line around it
+                if rendered:
+                    units.append("\n".join(rendered))
+                    rendered = []
+                units.append(_table(lines[i:j]))
+                i = j
+                continue
+            line = lines[i]
             if m := HEADING.match(line):
                 rendered.append(f"<b>{_inline(m[1])}</b>")
             else:
                 rendered.append(_inline(BULLET.sub(r"\1• ", line)))
-        units.append("\n".join(rendered))
+            i += 1
+        if rendered:
+            units.append("\n".join(rendered))
     return [u for u in units if u.strip()]
 
 
