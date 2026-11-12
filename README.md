@@ -253,6 +253,7 @@ turns it off.
 | `/cost`    | Estimated cost of the conversation                   |
 | `/usage`   | Plan usage: 5-hour and weekly limits                 |
 | `/login`   | Renew Claude's login from Telegram                   |
+| `/tldr`    | Shows the project's `TLDR.md`, kept by Claude       |
 | `/server`  | Machine health: load, CPU, memory, disk, busiest processes |
 | `/…`       | Anything else is passed to Claude (e.g. `/compact`)  |
 

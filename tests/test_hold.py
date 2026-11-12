@@ -802,3 +802,12 @@ async def test_menu_opens_a_setting_sets_it_and_comes_back(bot, monkeypatch):
     query = await press("menu:catchup=auto")
     assert bot.store.get(KEY).catchup == "send" and query.edited[-1].startswith("⚙️")
     await press("menu:close")
+
+
+async def test_tldr_shows_the_projects_summary(bot, tmp_path, monkeypatch):
+    monkeypatch.setattr(Bot, "_key", lambda self, update: KEY)
+    await bot._cmd_tldr(None, None)
+    assert "No TLDR.md" in bot.out.notices[-1]
+    (tmp_path / "TLDR.md").write_text("Does things.\n")
+    await bot._cmd_tldr(None, None)
+    assert bot.out.notices[-1] == "📝 Does things."

@@ -72,11 +72,16 @@ COMMANDS = [
     ("model", "switch model"),
     ("catchup", "go on by itself when a plan limit lifts"),
     ("status", "what's going on"),
+    ("tldr", "what this project is and what each part does"),
     ("cost", "estimated cost of this conversation"),
     ("usage", "plan usage limits (5-hour and weekly)"),
     ("login", "renew Claude's login from here"),
     ("server", "load of the machine the bot runs on"),
 ]
+
+# /tldr: the summary Claude keeps at the root of each project, and how much of it fits a message.
+TLDR_FILE = "TLDR.md"
+TLDR_MAX = 3500
 
 # What the CLI keeps between its auto-compact window and the size it compacts at: room for
 # the summary (min(max output, 20k)) plus 13k; checked with get_context_usage on 0.2.168.
@@ -135,11 +140,12 @@ MENU_COMMANDS = {
     "server": "server",
     "stop": "stop",
     "help": "help",
+    "tldr": "tldr",
 }
 MENU_ACTIONS = [
     [("📊 Status", "status"), ("💰 Cost", "cost"), ("📈 Usage", "usage")],
-    [("🆕 New", "new"), ("📜 Past", "list"), ("🖥 Server", "server")],
-    [("🛑 Stop", "stop"), ("❔ Help", "help"), ("✖️ Close", "close")],
+    [("📝 TLDR", "tldr"), ("🆕 New", "new"), ("📜 Past", "list")],
+    [("🖥 Server", "server"), ("❔ Help", "help"), ("🛑 Stop", "stop"), ("✖️ Close", "close")],
 ]
 
 MODELS = {
@@ -246,6 +252,7 @@ class Bot:
         self.app.add_handler(CommandHandler("catchup", self._cmd_catchup, filters=allowed))
         self.app.add_handler(CommandHandler("status", self._cmd_status, filters=allowed))
         self.app.add_handler(CommandHandler("cost", self._cmd_cost, filters=allowed))
+        self.app.add_handler(CommandHandler("tldr", self._cmd_tldr, filters=allowed))
         self.app.add_handler(CommandHandler("usage", self._cmd_usage, filters=allowed))
         self.app.add_handler(CommandHandler("login", self._cmd_login, filters=allowed))
         self.app.add_handler(CommandHandler("server", self._cmd_server, filters=allowed))
@@ -1793,6 +1800,20 @@ class Bot:
             used, total = context["totalTokens"] // 1000, context["maxTokens"] // 1000
             lines.append(f"context: {context['percentage']:.0f}% ({used}k / {total}k tokens)")
         await self._output(key).notice("\n".join(lines))
+
+    async def _cmd_tldr(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/tldr: the TLDR.md Claude keeps at the root of this conversation's folder."""
+        key = self._key(update)
+        path = Path(self._state(key).cwd) / TLDR_FILE
+        try:
+            text = path.read_text(errors="replace").strip()
+        except OSError:
+            text = ""
+        if len(text) > TLDR_MAX:
+            text = text[:TLDR_MAX].rstrip() + "\n…"
+        await self._output(key).notice(
+            f"📝 {text}" if text else f"No {TLDR_FILE} in {self._where(key)} yet: ask Claude to write one."
+        )
 
     async def _cmd_cost(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)
