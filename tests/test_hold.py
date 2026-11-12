@@ -330,7 +330,7 @@ async def test_limit_hit_again_keeps_the_choice_only_with_a_time_to_wait_for(lim
     state = limit.store.get(KEY)
     state.limit_auto = "send"
     await limit._on_limited(KEY, [], 1.0, cut=True)
-    assert state.limit_auto == "send" and "as you asked" in limit.out.notices[0]
+    assert state.limit_auto == "send" and "as you asked" in limit.out.sent[-1][0]
     state.limit_until = 0.0
     await limit._on_limited(KEY, [], None, cut=True)
     assert state.limit_auto == "" and state.prompt["kind"] == "schedule"
@@ -751,13 +751,13 @@ async def test_catchup_goes_on_after_every_limit_without_asking(limit):
     await limit._set_catchup(KEY, "auto")
     assert state.catchup == "send"
     await limit._on_limited(KEY, [], 1.0, cut=True)
-    assert state.limit_auto == "send" and state.prompt is None and "as you asked" in limit.out.notices[-1]
+    assert state.limit_auto == "send" and "as you asked (as after every limit)" in limit.out.sent[-1][0]
     limit.limit = False
     await limit._check_limit(KEY, state)
     assert limit.delivered == [CONTINUE_PROMPT]
     state.limit_auto, limit.limit = "", True  # the turn got through; a later limit goes on too
     await limit._on_limited(KEY, [], 2.0, cut=True)
-    assert state.limit_auto == "send" and state.prompt is None
+    assert state.limit_auto == "send" and state.prompt["kind"] == "schedule"
 
 
 async def test_catchup_set_during_a_limit_applies_to_it(limit):
@@ -767,4 +767,16 @@ async def test_catchup_set_during_a_limit_applies_to_it(limit):
     await limit._set_catchup(KEY, "compact")
     assert state.limit_auto == "compact"
     await limit._set_catchup(KEY, "ask")
+    assert state.catchup == state.limit_auto == ""
+
+
+async def test_limit_notice_sets_catchup_and_takes_it_back(limit):
+    await limit._on_limited(KEY, [], 1.0, cut=True)
+    state = limit.store.get(KEY)
+    query, rest = tap(limit, "catchup-auto")
+    await limit._on_guard(KEY, query, rest)
+    assert state.catchup == state.limit_auto == "send"
+    await limit._on_limited(KEY, [], 2.0, cut=True)  # hit again: the notice offers to go back to asking
+    query, rest = tap(limit, "catchup-ask")
+    await limit._on_guard(KEY, query, rest)
     assert state.catchup == state.limit_auto == ""

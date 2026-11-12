@@ -705,16 +705,18 @@ class Bot:
                     f"{what}"
                 )
             if state.limit_auto:
-                await self._output(key).notice(f"{text}; once it lifts I'll go on, as you asked. /stop drops it.")
-                return
-            text += "; once it lifts I'll ask for your OK to go on, unless you choose now. /stop drops it."
-            rows = [[("⏰ Continue when it lifts", "send")]]
+                always = " (as after every limit)" if state.catchup else ""
+                text += f"; once it lifts I'll go on, as you asked{always}. /stop drops it."
+                rows = [[("❓ Ask me instead", "catchup-ask")]]
+            else:
+                text += "; once it lifts I'll ask for your OK to go on, unless you choose now. /stop drops it."
+                rows = [[("⏰ Go on this time", "send"), ("🔁 After every limit", "catchup-auto")]]
+                if state.context_tokens >= self.cfg.wake_small:
+                    kilo = costguard.kilo(state.context_tokens)
+                    text += f"\n\nIf its cache has expired by then, going on re-sends {kilo} tokens."
+                    rows.append([("🗜 Compact this time", "compact"), ("🗜🔁 After every limit", "catchup-compact")])
             if reserve:
                 rows.insert(0, [("▶️ Send it anyway", "anyway")])
-            if state.context_tokens >= self.cfg.wake_small:
-                kilo = costguard.kilo(state.context_tokens)
-                text += f"\n\nIf its cache has expired by then, continuing re-sends {kilo} tokens."
-                rows.append([("🗜 Compact and continue when it lifts", "compact")])
             await self._prompt(key, "schedule", text, rows)
 
     async def _on_login_lost(self, key: Key, items: list[dict], cut: bool) -> None:
@@ -898,6 +900,9 @@ class Bot:
             state.limit_until = 0.0
             self.store.put(key, state)
             await self._release(key)
+            return
+        if kind == "schedule" and action.startswith("catchup-"):  # what /catchup sets, this limit included
+            await self._set_catchup(key, action.removeprefix("catchup-"))
             return
         if kind == "schedule":  # _check_limit acts on it once the limit lifts
             state.limit_auto = action
