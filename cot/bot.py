@@ -1811,9 +1811,10 @@ class Bot:
             text = ""
         if len(text) > TLDR_MAX:
             text = text[:TLDR_MAX].rstrip() + "\n…"
-        await self._output(key).notice(
-            f"📝 {text}" if text else f"No {TLDR_FILE} in {self._where(key)} yet: ask Claude to write one."
-        )
+        if text:
+            await self._output(key).text(f"📝 {text}")  # it's Markdown: shown formatted
+        else:
+            await self._output(key).notice(f"No {TLDR_FILE} in {self._where(key)} yet: ask Claude to write one.")
 
     async def _cmd_cost(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         key = self._key(update)

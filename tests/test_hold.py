@@ -48,6 +48,9 @@ class Out:
     async def notice(self, text):
         self.notices.append(text)
 
+    async def text(self, md):
+        self.sent.append((md, None))
+
 
 class Query:
     def __init__(self, data, markup):
@@ -808,6 +811,6 @@ async def test_tldr_shows_the_projects_summary(bot, tmp_path, monkeypatch):
     monkeypatch.setattr(Bot, "_key", lambda self, update: KEY)
     await bot._cmd_tldr(None, None)
     assert "No TLDR.md" in bot.out.notices[-1]
-    (tmp_path / "TLDR.md").write_text("Does things.\n")
+    (tmp_path / "TLDR.md").write_text("**App** does things.\n")
     await bot._cmd_tldr(None, None)
-    assert bot.out.notices[-1] == "📝 Does things."
+    assert bot.out.sent[-1][0] == "📝 **App** does things."  # Markdown, rendered by text()
