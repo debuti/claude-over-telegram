@@ -238,6 +238,7 @@ turns it off.
 
 | Command    | What it does                                         |
 |------------|------------------------------------------------------|
+| `/menu`    | Settings and commands as buttons, in one message     |
 | `/help`    | List commands                                        |
 | `/cwd`     | Folder of this topic (a first-level folder)          |
 | `/new`     | Start a fresh conversation                           |
@@ -254,6 +255,10 @@ turns it off.
 | `/login`   | Renew Claude's login from Telegram                   |
 | `/server`  | Machine health: load, CPU, memory, disk, busiest processes |
 | `/…`       | Anything else is passed to Claude (e.g. `/compact`)  |
+
+`/menu` sends a panel to use with your thumb: the model, tool activity, permission mode
+and what happens after a plan limit, each showing its current value and opening its choices
+in the same message, then buttons for the commands above. Close takes the buttons off.
 
 When Claude needs permission (the same cases where the terminal would ask), you
 get the request with ✅ Allow / ❌ Deny / ♾️ Always buttons. "Always" saves the

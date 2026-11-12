@@ -780,3 +780,25 @@ async def test_limit_notice_sets_catchup_and_takes_it_back(limit):
     query, rest = tap(limit, "catchup-ask")
     await limit._on_guard(KEY, query, rest)
     assert state.catchup == state.limit_auto == ""
+
+
+async def test_menu_opens_a_setting_sets_it_and_comes_back(bot, monkeypatch):
+    monkeypatch.setattr(Bot, "_assigned", lambda self, key: True)
+    monkeypatch.setattr(Bot, "_key", lambda self, update: KEY)
+    bot.cfg.allowed_user_ids, bot.cfg.permission_mode = {1}, "auto"
+    await bot._cmd_menu(None, None)
+    html, markup = bot.out.sent[-1]
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert "⏰ ❓ Ask me" in labels and "🛑 Stop" in labels
+
+    async def press(data):
+        query = Query(data, None)
+        query.from_user = SimpleNamespace(id=1)
+        await bot._on_button(SimpleNamespace(callback_query=query), SimpleNamespace(args=None))
+        return query
+
+    query = await press("menu:catchup")
+    assert "After a plan limit" in query.edited[-1]
+    query = await press("menu:catchup=auto")
+    assert bot.store.get(KEY).catchup == "send" and query.edited[-1].startswith("⚙️")
+    await press("menu:close")

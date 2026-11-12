@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
@@ -60,6 +60,7 @@ TOOL_LEVELS = {
 }
 
 COMMANDS = [
+    ("menu", "settings and commands with buttons"),
     ("help", "list commands"),
     ("new", "start a fresh conversation"),
     ("list", "recent conversations in this folder"),
@@ -122,6 +123,24 @@ CATCHUP = {
     "compact": "compact, then go on by itself",
 }
 CATCHUP_BUTTONS = {"send": "⏰ Go on by itself", "compact": "🗜 Compact, then go on", "": "❓ Ask me"}
+CATCHUP_ARGS = {"auto": "send", "compact": "compact", "ask": ""}
+
+# /menu's buttons that run a command, as (label, command); the settings come before them.
+MENU_COMMANDS = {
+    "status": "status",
+    "cost": "cost",
+    "usage": "usage",
+    "new": "new",
+    "list": "resume",
+    "server": "server",
+    "stop": "stop",
+    "help": "help",
+}
+MENU_ACTIONS = [
+    [("📊 Status", "status"), ("💰 Cost", "cost"), ("📈 Usage", "usage")],
+    [("🆕 New", "new"), ("📜 Past", "list"), ("🖥 Server", "server")],
+    [("🛑 Stop", "stop"), ("❔ Help", "help"), ("✖️ Close", "close")],
+]
 
 MODELS = {
     "claude-fable-5-2": "Fable 5.2",
@@ -219,6 +238,7 @@ class Bot:
         )
         self.app.add_handler(CommandHandler("new", self._cmd_new, filters=allowed))
         self.app.add_handler(CommandHandler(["list", "resume"], self._cmd_resume, filters=allowed))
+        self.app.add_handler(CommandHandler("menu", self._cmd_menu, filters=allowed))
         self.app.add_handler(CommandHandler("tools", self._cmd_tools, filters=allowed))
         self.app.add_handler(CommandHandler("mode", self._cmd_mode, filters=allowed))
         self.app.add_handler(CommandHandler("stop", self._cmd_stop, filters=allowed))
@@ -1567,13 +1587,7 @@ class Bot:
         if ctx.args:
             await self._set_tools(sess, ctx.args[0])
             return
-        buttons = [
-            [InlineKeyboardButton(f"{'● ' if lvl == sess.state.tools else ''}{desc}", callback_data=f"tools:{lvl}")]
-            for lvl, desc in TOOL_LEVELS.items()
-        ]
-        await sess.out.send_html(
-            f"Tool activity: <b>{sess.state.tools}</b>", reply_markup=InlineKeyboardMarkup(buttons)
-        )
+        await self._send_picker(key, "tools")
 
     async def _set_tools(self, sess: Session, level: str) -> None:
         if level not in TOOL_LEVELS:
@@ -1591,12 +1605,7 @@ class Bot:
         if ctx.args:
             await self._set_mode(sess, ctx.args[0])
             return
-        current = sess.state.mode or self.cfg.permission_mode
-        buttons = [
-            [InlineKeyboardButton(f"{'● ' if m == current else ''}{m}: {desc}", callback_data=f"mode:{m}")]
-            for m, desc in MODES.items()
-        ]
-        await sess.out.send_html(f"Permission mode: <b>{current}</b>", reply_markup=InlineKeyboardMarkup(buttons))
+        await self._send_picker(key, "mode")
 
     async def _set_mode(self, sess: Session, mode: str) -> None:
         if mode not in MODES:
@@ -1641,12 +1650,7 @@ class Bot:
         if ctx.args:
             await self._set_model(sess, ctx.args[0])
             return
-        current = sess.state.model or "default"
-        buttons = [
-            [InlineKeyboardButton(f"{'● ' if m == current else ''}{name}", callback_data=f"model:{m}")]
-            for m, name in [*MODELS.items(), ("default", "Default (Claude Code's choice)")]
-        ]
-        await sess.out.send_html(f"Model: <b>{current}</b>", reply_markup=InlineKeyboardMarkup(buttons))
+        await self._send_picker(key, "model")
 
     async def _set_model(self, sess: Session, model: str) -> None:
         try:
@@ -1665,21 +1669,86 @@ class Bot:
         if ctx.args:
             await self._set_catchup(key, ctx.args[0].lower())
             return
-        current = self._state(key).catchup
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    f"{'● ' if value == current else ''}{CATCHUP_BUTTONS[value]}", callback_data=f"catchup:{arg}"
-                )
-            ]
-            for arg, value in (("auto", "send"), ("compact", "compact"), ("ask", ""))
+        await self._send_picker(key, "catchup")
+
+    def _picker(self, key: Key, what: str) -> tuple[str, list[tuple[str, str]]]:
+        """The choices of /tools, /mode, /model or /catchup: a heading and (label, value), the current one marked."""
+        state = self._state(key)
+        if what == "tools":
+            heading, current, options = "Tool activity", state.tools, TOOL_LEVELS.items()
+        elif what == "mode":
+            current = state.mode or self.cfg.permission_mode
+            heading, options = "Permission mode", [(m, f"{m}: {desc}") for m, desc in MODES.items()]
+        elif what == "model":
+            current = state.model or "default"
+            heading, options = "Model", [*MODELS.items(), ("default", "Default (Claude Code's choice)")]
+        else:
+            heading, current = "After a plan limit", state.catchup
+            options = [(arg, CATCHUP_BUTTONS[value]) for arg, value in CATCHUP_ARGS.items()]
+            current = next(arg for arg, value in CATCHUP_ARGS.items() if value == current)
+        shown = dict(options).get(current, current)
+        choices = [(f"{'● ' if v == current else ''}{label}", v) for v, label in options]
+        return f"{heading}: <b>{esc(shown)}</b>", choices
+
+    async def _send_picker(self, key: Key, what: str) -> None:
+        heading, choices = self._picker(key, what)
+        buttons = [[InlineKeyboardButton(label, callback_data=f"{what}:{v}")] for label, v in choices]
+        await self._output(key).send_html(heading, reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _set(self, key: Key, what: str, value: str) -> None:
+        """What a button of a picker (/tools, /mode, /model, /catchup or /menu) chose."""
+        if what == "catchup":
+            await self._set_catchup(key, value)
+        else:
+            setter = {"tools": self._set_tools, "mode": self._set_mode, "model": self._set_model}[what]
+            await setter(self._session(key), value)
+
+    def _menu(self, key: Key) -> tuple[str, InlineKeyboardMarkup]:
+        """/menu's main page: the settings, each opening its choices, then the commands."""
+        settings = []
+        for what, icon in (("model", "🧠"), ("tools", "🛠"), ("mode", "🔐"), ("catchup", "⏰")):
+            heading, _ = self._picker(key, what)
+            value = re.sub(r"<[^>]+>", "", heading.partition(": ")[2])
+            settings.append(InlineKeyboardButton(f"{icon} {value}", callback_data=f"menu:{what}"))
+        rows = [settings[:2], settings[2:]] + [
+            [InlineKeyboardButton(label, callback_data=f"menu:{cmd}") for label, cmd in row] for row in MENU_ACTIONS
         ]
-        await self._output(key).send_html(
-            f"After a plan limit: <b>{CATCHUP[current]}</b>", reply_markup=InlineKeyboardMarkup(buttons)
-        )
+        return f"⚙️ {esc(self._where(key))}", InlineKeyboardMarkup(rows)
+
+    async def _cmd_menu(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        key = self._key(update)
+        text, markup = self._menu(key)
+        await self._output(key).send_html(text, reply_markup=markup)
+
+    async def _on_menu(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE, key: Key, query, rest: str) -> None:
+        """A /menu button: a setting's page and back, a choice (then back to the main page), or a command."""
+        await query.answer()
+        page, _, value = rest.partition("=")
+        if page == "close":
+            await query.edit_message_reply_markup(None)
+            return
+        if page in ("model", "tools", "mode", "catchup"):
+            if not await self._ready(key):
+                return
+            if value:
+                await self._set(key, page, value)
+            else:
+                heading, choices = self._picker(key, page)
+                rows = [[InlineKeyboardButton(label, callback_data=f"menu:{page}={v}")] for label, v in choices]
+                rows.append([InlineKeyboardButton("‹ Back", callback_data="menu:main")])
+                markup = InlineKeyboardMarkup(rows)
+                await query.edit_message_text(heading, parse_mode=ParseMode.HTML, reply_markup=markup)
+                return
+        elif page in MENU_COMMANDS:
+            await getattr(self, f"_cmd_{MENU_COMMANDS[page]}")(update, ctx)
+        text, markup = self._menu(key)
+        try:
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+        except BadRequest as e:  # unchanged: Telegram refuses an edit to the same thing
+            log.debug("menu not edited: %s", e)
 
     async def _set_catchup(self, key: Key, arg: str) -> None:
-        value = {"auto": "send", "on": "send", "compact": "compact", "ask": "", "off": "", "no": ""}.get(arg)
+        value = {**CATCHUP_ARGS, "on": "send", "off": "", "no": ""}.get(arg)
         if value is None:
             await self._output(key).notice("Unknown choice. Options: auto, compact, ask")
             return
@@ -1819,6 +1888,8 @@ class Bot:
             await query.answer()
             await query.edit_message_reply_markup(None)
             await self._set_cwd(key, rest)
+        elif kind == "menu":
+            await self._on_menu(update, ctx, key, query, rest)
         elif kind == "wake":  # the wake picker of 2.12 and before
             await query.answer("This prompt has expired")
             await query.edit_message_reply_markup(None)
@@ -1831,22 +1902,10 @@ class Bot:
             await self._release(key)
         elif kind == "guard":
             await self._on_guard(key, query, rest)
-        elif kind == "tools":
+        elif kind in ("tools", "model", "catchup", "mode"):
             await query.answer()
             await query.edit_message_reply_markup(None)
-            await self._set_tools(self._session(key), rest)
-        elif kind == "model":
-            await query.answer()
-            await query.edit_message_reply_markup(None)
-            await self._set_model(self._session(key), rest)
-        elif kind == "catchup":
-            await query.answer()
-            await query.edit_message_reply_markup(None)
-            await self._set_catchup(key, rest)
-        elif kind == "mode":
-            await query.answer()
-            await query.edit_message_reply_markup(None)
-            await self._set_mode(self._session(key), rest)
+            await self._set(key, kind, rest)
         else:
             await query.answer()
 
