@@ -114,7 +114,7 @@ REFUSED_CONTINUE_PROMPT = (
     "Carry on with what you were doing.]"
 )
 # Waits before trying again after an "authentication failed" with a login that looks fine; then it's /login.
-REFUSED_RETRIES = (120, 300, 900)
+REFUSED_RETRIES = (120, 300, 600, 900, 1800, 1800)  # about 1h30 in all: an outage of the login servers
 LOGIN_CONTINUE_PROMPT = (
     "[From the Telegram bot: your login expired in the middle of your last turn and has now been renewed. "
     "Carry on with what you were doing.]"

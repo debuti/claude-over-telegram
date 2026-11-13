@@ -381,7 +381,8 @@ async def test_refused_with_a_good_login_tries_again_then_asks_for_it(bot, monke
     monkeypatch.setattr(usage, "renewed_since", lambda when: False)
     await bot._on_login_lost(KEY, [], True)
     state = bot.store.get(KEY)
-    assert "🌩" in bot.out.notices[-1] and "1/3" in bot.out.notices[-1] and "/login" not in bot.out.notices[-1]
+    notice = bot.out.notices[-1]
+    assert "🌩" in notice and f"1/{len(bot_mod.REFUSED_RETRIES)}" in notice and "/login" not in notice
     await bot._on_login_lost(KEY, [], False)  # a keep-alive finding out too: said once, no extra try
     assert len(bot.out.notices) == 1 and state.login_retries == 1
     await bot._check_login(KEY, state)
