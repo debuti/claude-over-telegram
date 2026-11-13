@@ -209,7 +209,7 @@ def auto(bot, monkeypatch):
     bot.store.put(KEY, state)
     bot.verdict, bot.asked = None, []
 
-    async def recent(cwd):
+    async def recent(cwd, limit=5):
         return [SimpleNamespace(session_id="s1", custom_title="Fix the parser", summary=None, first_prompt=None)]
 
     async def decide(cli, cwd, title, history, message):

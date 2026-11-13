@@ -243,6 +243,7 @@ turns it off.
 | `/cwd`     | Folder of this topic (a first-level folder)          |
 | `/new`     | Start a fresh conversation                           |
 | `/list`    | Recent conversations in this folder, to resume       |
+| `/older`   | Older conversations in this folder (up to 30)        |
 | `/resume`  | `/resume <number or id>`: go back to one of them     |
 | `/stop`    | Interrupt Claude and drop queued messages            |
 | `/tools`   | Tool activity: hidden, calls, or calls with output   |
@@ -355,8 +356,8 @@ restarts (`state/sessions.json`).
 
 ### Past conversations
 
-`/list` shows the last 10 conversations of the chat's folder, the same ones
-`claude -r` offers there, whether they were started from Telegram or from the
+`/list` shows the last 5 conversations of the chat's folder (`/older`, or its
+button, shows up to 30), the same ones `claude -r` offers there, whether they were started from Telegram or from the
 terminal. Tap a number (or send `/resume 3`, or `/resume <id prefix>`) to switch
 to it with its full context; `/new` starts a fresh one. Don't keep the same
 conversation open in the terminal and in Telegram at once: both would append to

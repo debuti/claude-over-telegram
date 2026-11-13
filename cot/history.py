@@ -7,12 +7,13 @@ from claude_agent_sdk import SDKSessionInfo, list_sessions
 
 from .render import esc
 
-LIMIT = 10
+SHORT = 5  # what /list and the wake prompt show
+LIMIT = 30  # what /older shows, and where /resume <n> looks
 
 
-async def recent(cwd: str) -> list[SDKSessionInfo]:
+async def recent(cwd: str, limit: int = SHORT) -> list[SDKSessionInfo]:
     # Only this exact folder: a session is resumable only from the cwd it was started in.
-    return await asyncio.to_thread(list_sessions, cwd, LIMIT, 0, False)
+    return await asyncio.to_thread(list_sessions, cwd, limit, 0, False)
 
 
 def find(sessions: list[SDKSessionInfo], ref: str) -> SDKSessionInfo | None:
@@ -36,7 +37,8 @@ def title(s: SDKSessionInfo, width: int = 70) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
 
 
-FOOTER = "Tap a number, or /resume &lt;number or id&gt;. /new starts a fresh one."
+FOOTER = "Tap a number, or /resume &lt;number or id&gt;. /new starts a fresh one; /older shows older ones."
+OLDER_FOOTER = "Tap a number, or /resume &lt;number or id&gt;. /new starts a fresh one."
 
 
 def render(sessions: list[SDKSessionInfo], current: str | None, where: str, footer: str = FOOTER) -> str:

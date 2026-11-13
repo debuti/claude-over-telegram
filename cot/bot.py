@@ -64,6 +64,7 @@ COMMANDS = [
     ("help", "list commands"),
     ("new", "start a fresh conversation"),
     ("list", "recent conversations in this folder"),
+    ("older", "older conversations in this folder"),
     ("resume", "go back to a past conversation"),
     ("stop", "interrupt Claude and drop queued messages"),
     ("cwd", "directory this conversation works in"),
@@ -243,7 +244,7 @@ class Bot:
             MessageHandler(allowed & filters.StatusUpdate.FORUM_TOPIC_EDITED, self._on_topic_edited)
         )
         self.app.add_handler(CommandHandler("new", self._cmd_new, filters=allowed))
-        self.app.add_handler(CommandHandler(["list", "resume"], self._cmd_resume, filters=allowed))
+        self.app.add_handler(CommandHandler(["list", "older", "resume"], self._cmd_resume, filters=allowed))
         self.app.add_handler(CommandHandler("menu", self._cmd_menu, filters=allowed))
         self.app.add_handler(CommandHandler("tools", self._cmd_tools, filters=allowed))
         self.app.add_handler(CommandHandler("mode", self._cmd_mode, filters=allowed))
@@ -1533,19 +1534,23 @@ class Bot:
         await self._output(key).notice(f"🆕 New conversation in {state.cwd}")
 
     async def _cmd_resume(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """/list shows past conversations of this folder; /resume <n|id> switches to one."""
+        """/list shows the last few conversations here, /older more of them; /resume <n|id> switches to one."""
         key = self._key(update)
         if not await self._ready(key):
             return
+        older = bool(update.effective_message and (update.effective_message.text or "").startswith("/older"))
+        await self._list(key, ctx.args or [], older)
+
+    async def _list(self, key: Key, args: list[str], older: bool = False) -> None:
         state = self._state(key)
-        sessions = await history.recent(state.cwd)
-        if ctx.args:
-            found = history.find(sessions, ctx.args[0])
+        sessions = await history.recent(state.cwd, history.LIMIT if older or args else history.SHORT)
+        if args:
+            found = history.find(sessions, args[0])
             if found:
                 await self._resume(key, found.session_id)
                 await self._release(key)
             else:
-                await self._output(key).notice(f"⚠️ No conversation {ctx.args[0]} here; /list shows them.")
+                await self._output(key).notice(f"⚠️ No conversation {args[0]} here; /older shows them.")
             return
         if not sessions:
             await self._output(key).notice(f"No past conversations in {self._where(key)}.")
@@ -1554,8 +1559,13 @@ class Bot:
             InlineKeyboardButton(str(i), callback_data=f"resume:{s.session_id}") for i, s in enumerate(sessions, 1)
         ]
         rows = [buttons[i : i + 5] for i in range(0, len(buttons), 5)]
+        footer = history.OLDER_FOOTER
+        if not older and len(sessions) >= history.SHORT:  # maybe more: offer them
+            rows.append([InlineKeyboardButton("📜 Older ones", callback_data="older:")])
+            footer = history.FOOTER
         await self._output(key).send_html(
-            history.render(sessions, state.session_id, self._where(key)), reply_markup=InlineKeyboardMarkup(rows)
+            history.render(sessions, state.session_id, self._where(key), footer),
+            reply_markup=InlineKeyboardMarkup(rows),
         )
 
     async def _resume(self, key: Key, session_id: str) -> None:
@@ -1567,7 +1577,7 @@ class Bot:
         if any(s.state.session_id == session_id for k, s in self.sessions.items() if k != key):
             await out.notice("⚠️ That conversation is open in another topic; /new there first.")
             return
-        info = next((s for s in await history.recent(state.cwd) if s.session_id == session_id), None)
+        info = next((s for s in await history.recent(state.cwd, history.LIMIT) if s.session_id == session_id), None)
         if info is None:
             await out.notice("⚠️ That conversation is no longer here.")
             return
@@ -1915,8 +1925,12 @@ class Bot:
         elif kind == "wake":  # the wake picker of 2.12 and before
             await query.answer("This prompt has expired")
             await query.edit_message_reply_markup(None)
-        elif kind in ("tools", "model", "mode", "resume", "guard", "catchup") and not await self._ready(key):
+        elif kind in ("tools", "model", "mode", "resume", "older", "guard", "catchup") and not await self._ready(key):
             await query.answer()
+        elif kind == "older":
+            await query.answer()
+            await query.edit_message_reply_markup(None)
+            await self._list(key, [], older=True)
         elif kind == "resume":
             await query.answer()
             await query.edit_message_reply_markup(None)
