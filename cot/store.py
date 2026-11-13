@@ -57,6 +57,9 @@ class ConvState:
     # Alarms Claude asked for with set_alarm ({"id", "reason", "minutes", "cwd", "asked_at", "at", "html"}):
     # "at" is 0 until the user approves it, then the epoch seconds it rings at.
     wakeups: list[dict] = field(default_factory=list)
+    # Messages sent while Claude sleeps until an approved alarm ({"text", "ids"}): they go with it
+    # when it rings, or with /wake.
+    for_alarm: list[dict] = field(default_factory=list)
 
 
 def _migrate(v: dict) -> dict:

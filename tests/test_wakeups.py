@@ -10,6 +10,7 @@ from cot.bot import Bot
 from cot.store import ConvState, Store
 
 ME = (1, 10)
+REAL_SUBMIT = Bot._submit  # before the fixture swaps it
 
 
 class Out:
@@ -264,3 +265,57 @@ def test_keepalives_last_until_the_alarm_when_cheaper(bot, monkeypatch):
     assert bot._keepalive_window(state) == 3600
     state.wakeups = [{"id": "a", "at": 0.0}]  # asked, not approved
     assert bot._keepalive_window(state) == 3600
+
+
+def write(bot, text):
+    bot.texts = getattr(bot, "texts", {})
+    asyncio.run(REAL_SUBMIT(bot, ME, text, [5]))
+
+
+def test_asleep_for_an_alarm_messages_wait_for_it(bot, monkeypatch):
+    ask(bot, 30)
+    press(bot, button(bot.asked[0]))
+    write(bot, "how is it going?")
+    write(bot, "and the logs?")
+    assert not bot.submitted and "/wake" in bot.posted[-1]
+    assert [m["text"] for m in bot.store.get(ME).for_alarm] == ["how is it going?", "and the logs?"]
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now + 31 * 60)
+    ring(bot)
+    texts = [t for _, t, _, _ in bot.submitted]
+    assert "rang" in texts[0] and texts[1:] == ["how is it going?", "and the logs?"]
+    assert not any(hold for *_, hold in bot.submitted) and not bot.store.get(ME).for_alarm
+
+
+def test_wake_rings_the_next_alarm_now(bot):
+    for minutes in (60, 30):
+        ask(bot, minutes, f"in {minutes}")
+    for markup in bot.asked:
+        press(bot, button(markup))
+    write(bot, "wake up")
+    asyncio.run(bot._cmd_wake(None, None))
+    texts = [t for _, t, _, _ in bot.submitted]
+    assert "woke you" in texts[0] and "in 30" in texts[0] and texts[1:] == ["wake up"]
+    [left] = bot.store.get(ME).wakeups
+    assert left["reason"] == "in 60"
+
+
+def test_wake_without_an_alarm_says_so(bot):
+    asyncio.run(bot._cmd_wake(None, None))
+    assert not bot.submitted and "no alarm" in bot.posted[-1]
+
+
+def test_cancelling_the_alarm_lets_waiting_messages_go(bot):
+    ask(bot, 30)
+    query = press(bot, button(bot.asked[0]))
+    write(bot, "never mind")
+    press(bot, button(query.markup))
+    assert [t for _, t, _, _ in bot.submitted] == ["never mind"]
+
+
+def test_awake_its_messages_go_straight_on(bot):
+    ask(bot, 30)
+    press(bot, button(bot.asked[0]))
+    sess = SimpleNamespace(connected=True, pending=[], state=bot.store.get(ME))
+    bot.sessions = {ME: sess}
+    assert not bot._alarm_asleep(ME)

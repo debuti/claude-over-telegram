@@ -64,6 +64,7 @@ COMMANDS = [
     ("help", "list commands"),
     ("new", "start a fresh conversation"),
     ("sleep", "let this conversation sleep: no cache warnings or keep-alives"),
+    ("wake", "ring its alarm now, with the messages waiting for it"),
     ("list", "recent conversations in this folder"),
     ("older", "older conversations in this folder"),
     ("resume", "go back to a past conversation"),
@@ -101,6 +102,11 @@ AGENT_SEND_OUTCOME = "[From the Telegram bot, about your message to other agents
 AGENT_TEXT_LIMIT = 3000  # with the prompt around it, what fits in a Telegram message once escaped
 # What an alarm Claude asked for (set_alarm) brings it when it rings.
 WAKEUP_MESSAGE = "[From the Telegram bot: the alarm you asked for {when} ago rang. You set it to: {reason}]"
+# The same alarm, rung early by the user with /wake.
+WAKEUP_FORCED = (
+    "[From the Telegram bot: the user woke you {when} after you asked for an alarm, before it rang. "
+    "You set it to: {reason}]"
+)
 # Keep-alives for an alarm keep the cache this long past it: the alarm loop looks every 15 s.
 WAKEUP_SLACK = 2 * 60
 USAGE_FRESH = 30  # seconds a plan-usage reading still does for /usage
@@ -253,6 +259,7 @@ class Bot:
         )
         self.app.add_handler(CommandHandler("new", self._cmd_new, filters=allowed))
         self.app.add_handler(CommandHandler("sleep", self._cmd_sleep, filters=allowed))
+        self.app.add_handler(CommandHandler("wake", self._cmd_wake, filters=allowed))
         self.app.add_handler(CommandHandler(["list", "older", "resume"], self._cmd_resume, filters=allowed))
         self.app.add_handler(CommandHandler("menu", self._cmd_menu, filters=allowed))
         self.app.add_handler(CommandHandler("tools", self._cmd_tools, filters=allowed))
@@ -450,6 +457,17 @@ class Bot:
         if state.asleep:  # a message wakes it up
             state.asleep = False
             self.store.put(key, state)
+        # Asleep until an approved alarm: messages wait for it (or for /wake), they don't wake it.
+        if check and hold and self._alarm_asleep(key):
+            state.for_alarm.append({"text": text, "ids": ids or []})
+            self.store.put(key, state)
+            if len(state.for_alarm) == 1:
+                rings = min(w["at"] for w in state.wakeups if w.get("at"))
+                await self._output(key).notice(
+                    f"⏰ Claude sleeps until its alarm ({_clock(rings)}): your message waits for it. "
+                    "/wake to ring it now."
+                )
+            return
         # A warning or a plan limit is already holding some, or asking about the cut turn: this one waits too.
         if state.held or state.login_lost_at or (state.limit_cut and not state.limit_until):
             state.held.append({"text": text, "ids": ids or []})
@@ -580,8 +598,11 @@ class Bot:
         if msg_id is None:
             raise ValueError(f"its topic doesn't take messages (deleted? the user can open a new one for {name})")
         await self._submit(topic, AGENT_MESSAGE.format(sender=sender, text=text), [msg_id])
-        if any(item["ids"] == [msg_id] for item in self._state(topic).held):
+        state = self._state(topic)
+        if any(item["ids"] == [msg_id] for item in state.held):
             return "held until the user decides (its conversation is asleep, or a limit stops it)"
+        if any(item["ids"] == [msg_id] for item in state.for_alarm):
+            return "queued: its agent sleeps until an alarm and gets it when that rings"
         return "delivered"
 
     async def _ask_wakeup(self, key: Key, minutes: int, reason: str) -> str:
@@ -641,7 +662,7 @@ class Bot:
             await query.edit_message_reply_markup(None)
             return
         await query.answer()
-        keyboard = None
+        keyboard, flush = None, False
         if choice == permissions.ALLOW and not item["at"]:
             # Counted from when Claude asked: approved late, it rings at once.
             item["at"] = max(item["asked_at"] + item["minutes"] * 60, time.time())
@@ -656,6 +677,7 @@ class Bot:
         elif choice == "cancel":
             state.wakeups.remove(item)
             note = "🔕 Cancelled"
+            flush = True
         elif choice == permissions.DENY and not item["at"]:
             state.wakeups.remove(item)
             note = permissions.OUTCOME[permissions.DENY]
@@ -668,6 +690,8 @@ class Bot:
             )
         except TelegramError as e:
             log.warning("could not update the alarm's message: %s", e)
+        if flush:  # no alarm left to wait for: what waited for it goes now
+            await self._flush_for_alarm(key)
         if keyboard and (sess := self.sessions.get(key)) and sess.connected:
             # Not left to Claude: whatever it would keep polling with goes with its process.
             task = asyncio.create_task(self._put_to_sleep(key, sess))
@@ -694,11 +718,32 @@ class Bot:
             if item.get("cwd") != state.cwd or not self._assigned(key):
                 await out.notice(f"🔕 An alarm for {Path(item.get('cwd', '')).name} didn't ring: the topic moved on")
                 continue
-            msg_id = await out.send_html(f"⏰ <b>Alarm</b>\n{esc(item['reason'])}")
+            forced = item.get("forced")
+            msg_id = await out.send_html(f"⏰ <b>{'Woken up' if forced else 'Alarm'}</b>\n{esc(item['reason'])}")
             when = _span(max(1, round((now - item["asked_at"]) / 60)))
-            text = WAKEUP_MESSAGE.format(when=when, reason=item["reason"])
+            text = (WAKEUP_FORCED if forced else WAKEUP_MESSAGE).format(when=when, reason=item["reason"])
             # The user approved waking it: no wake warning, but plan limits still hold it.
             await self._submit(key, text, [msg_id] if msg_id else None, hold=False)
+            await self._flush_for_alarm(key, force=True)
+        await self._flush_for_alarm(key)
+
+    def _alarm_asleep(self, key: Key) -> bool:
+        """Claude's process ended until an approved alarm rings (the topic shows ⏰)."""
+        state = self._state(key)
+        sess = self.sessions.get(key)
+        if sess and (sess.connected or sess.pending):
+            return False
+        return any(w.get("at") for w in state.wakeups)
+
+    async def _flush_for_alarm(self, key: Key, force: bool = False) -> None:
+        """Hand Claude the messages that waited for its alarm, once it rang (force) or none is left."""
+        state = self._state(key)
+        if not state.for_alarm or (not force and self._alarm_asleep(key)):
+            return
+        items, state.for_alarm = state.for_alarm, []
+        self.store.put(key, state)
+        for item in items:  # waking it was decided: past the wake warning, not past a plan limit
+            await self._submit(key, item["text"], item["ids"], hold=False)
 
     def _should_hold(self, key: Key) -> bool:
         """A conversation asleep with its cache gone: where its next message goes is asked.
@@ -1139,7 +1184,7 @@ class Bot:
         await self._announce_version()
         # Messages that were waiting for Claude when the bot stopped.
         for key, state in self.store.items():
-            for item in state.pending + state.held:  # sent before the restart
+            for item in state.pending + state.held + state.for_alarm:  # sent before the restart
                 self._remember(key, item["text"], item["ids"])
             if state.pending and self._assigned(key):
                 if await self._blocked():
@@ -1237,7 +1282,7 @@ class Bot:
             room = titles.room(state.context_tokens, max(self.cfg.compact_at, 2 * state.after_compact))
         # Just compacted, the old context's cache is no use: until the next answer there's none to lose.
         cache = titles.cache(self._cache_lasts(state)) if state.last_api_at and state.context_tokens else ""
-        queued = (sess.queued if sess else len(state.pending)) + len(state.held)
+        queued = (sess.queued if sess else len(state.pending)) + len(state.held) + len(state.for_alarm)
         model = titles.model(state.model or state.last_model)
         return titles.compose(state.title, status, room, cache, queued, model)
 
@@ -1601,14 +1646,31 @@ class Bot:
         if sess:
             await sess.close()
         await self._delete_alarm(key)
-        dropped = len(state.wakeups)
-        state.asleep, state.wakeups = True, []
+        dropped, waiting = len(state.wakeups), len(state.for_alarm)
+        state.asleep, state.wakeups, state.for_alarm = True, [], []
         self.store.put(key, state)
         alarms = f" Its {dropped} alarm{'s' * (dropped > 1)} won't ring." if dropped else ""
+        if waiting:
+            alarms += f" Dropped {waiting} message{'s' * (waiting > 1)} waiting for it."
         await out.notice(
             f"💤 Asleep: no more cache warnings or keep-alives here, its cache may go.{alarms} "
             "Your next message wakes it up."
         )
+
+    async def _cmd_wake(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/wake: ring the next alarm now, and with it the messages that waited for it."""
+        key = self._key(update)
+        if not await self._ready(key):
+            return
+        state = self._state(key)
+        approved = [w for w in state.wakeups if w.get("at")]
+        if not approved:
+            await self._output(key).notice("Nothing to wake: no alarm is set here.")
+            return
+        item = min(approved, key=lambda w: w["at"])
+        item["at"], item["forced"] = time.time(), True
+        self.store.put(key, state)
+        await self._check_wakeups(key, state)
 
     async def _cmd_resume(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """/list shows the last few conversations here, /older more of them; /resume <n|id> switches to one."""
@@ -1721,9 +1783,9 @@ class Bot:
         cut = state.limit_cut
         state.limit_auto, state.login_lost_at = "", 0.0  # with nothing waiting, the next message finds out
         state.login_retry_at, state.login_retries = 0.0, 0
-        if state.held or cut:  # held back by a warning, or waiting for a plan limit: dropped too
-            dropped += len(state.held)
-            state.held, state.limit_cut = [], False
+        if state.held or cut or state.for_alarm:  # held back by a warning, a plan limit or an alarm: dropped too
+            dropped += len(state.held) + len(state.for_alarm)
+            state.held, state.limit_cut, state.for_alarm = [], False, []
             self.store.put(key, state)
         await self._drop_prompt(key)
         if not running:

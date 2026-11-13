@@ -246,6 +246,7 @@ turns it off.
 | `/cwd`     | Folder of this topic (a first-level folder)          |
 | `/new`     | Start a fresh conversation                           |
 | `/sleep`   | Done for now: no cache warnings, keep-alives, alarms |
+| `/wake`    | Ring the next alarm now, with the messages waiting for it |
 | `/list`    | Recent conversations in this folder, to resume       |
 | `/older`   | Older conversations in this folder (up to 30)        |
 | `/resume`  | `/resume <number or id>`: go back to one of them     |
@@ -312,8 +313,9 @@ kept warm with keep-alives until the alarm rings (whatever `KEEPALIVE_HOURS`
 says), when that costs less than re-sending the context cold then: with the
 1-hour cache, for alarms up to about 18 hours; each keep-alive brings the
 process back for a moment and ends it again. Jobs started
-detached (`setsid nohup`) go on, and the next message, or the alarm, resumes
-the conversation; denied,
+detached (`setsid nohup`) go on. Your messages meanwhile don't wake it: they
+wait for the alarm (the topic's name counts them) and go with it when it rings;
+`/wake` rings it now, cancelling it lets them go, `/stop` or `/sleep` drops them. Denied,
 nothing rings and Claude isn't told (so it costs no turn). The time counts from
 when Claude asked, so one approved late rings at once. When it rings the topic
 shows `⏰ Alarm` and Claude gets a message with its reason, past the wake warning
