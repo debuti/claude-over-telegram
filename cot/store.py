@@ -43,6 +43,11 @@ class ConvState:
     catchup: str = ""
     # When Claude's login was found gone, while held messages wait for it to come back; else 0.
     login_lost_at: float = 0.0
+    # An "authentication failed" with a login that looks fine (a 403 from Cloudflare in front of the API):
+    # when to try again (0 if it's the login itself that's gone), how many tries so far, and when the last one went.
+    login_retry_at: float = 0.0
+    login_retries: int = 0
+    login_retried_at: float = 0.0
     # The warning whose buttons are live: {"nonce", "msg_id", "kind"}; at most one per conversation.
     prompt: dict | None = None
     # Messages to other agents waiting for the user's button ({"id", "sender", "to", "text", "html"}).

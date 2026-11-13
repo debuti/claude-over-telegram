@@ -91,6 +91,7 @@ def bot(tmp_path, monkeypatch):
         return self.limit
 
     monkeypatch.setattr(Bot, "_blocked", blocked)
+    monkeypatch.setattr(usage, "login_valid", lambda: False)
     monkeypatch.setattr(Bot, "_hard_blocked", blocked)
     monkeypatch.setattr(Bot, "_output", lambda self, key: self.out)
     monkeypatch.setattr(Bot, "_should_hold", lambda self, key: self.hold)
@@ -372,6 +373,25 @@ async def test_lost_login_that_cut_a_turn_carries_on_with_it(bot, monkeypatch):
     assert "cut short" in bot.out.notices[0] and "waiting" not in bot.out.notices[0]
     await bot._check_login(KEY, bot.store.get(KEY))
     assert bot.delivered == [bot_mod.LOGIN_CONTINUE_PROMPT]
+
+
+async def test_refused_with_a_good_login_tries_again_then_asks_for_it(bot, monkeypatch):
+    bot.hold = False
+    monkeypatch.setattr(usage, "login_valid", lambda: True)
+    monkeypatch.setattr(usage, "renewed_since", lambda when: False)
+    await bot._on_login_lost(KEY, [], True)
+    state = bot.store.get(KEY)
+    assert "🌩" in bot.out.notices[-1] and "1/3" in bot.out.notices[-1] and "/login" not in bot.out.notices[-1]
+    await bot._on_login_lost(KEY, [], False)  # a keep-alive finding out too: said once, no extra try
+    assert len(bot.out.notices) == 1 and state.login_retries == 1
+    await bot._check_login(KEY, state)
+    assert bot.delivered == []  # not yet
+    for _ in range(len(bot_mod.REFUSED_RETRIES)):
+        state.login_retry_at = time.time() - 1
+        await bot._check_login(KEY, state)
+        assert bot.delivered[-1] == bot_mod.REFUSED_CONTINUE_PROMPT and state.login_lost_at == 0
+        await bot._on_login_lost(KEY, [], True)
+    assert "/login" in bot.out.notices[-1] and state.login_retry_at == 0 and state.login_lost_at
 
 
 async def test_code_goes_to_the_login_and_not_to_claude(bot):

@@ -108,6 +108,12 @@ RESERVE_NAMES = {"session": "5-hour", "weekly_all": "weekly"}
 VERSION_NOTICE_TRIES = 3  # conversations to try the "new version" notice in
 
 # What goes to Claude, ahead of any waiting messages, to carry on with a turn a lost login cut short.
+REFUSED_CONTINUE_PROMPT = (
+    "[From the Telegram bot: an error reaching Anthropic's servers cut your last turn short. "
+    "Carry on with what you were doing.]"
+)
+# Waits before trying again after an "authentication failed" with a login that looks fine; then it's /login.
+REFUSED_RETRIES = (120, 300, 900)
 LOGIN_CONTINUE_PROMPT = (
     "[From the Telegram bot: your login expired in the middle of your last turn and has now been renewed. "
     "Carry on with what you were doing.]"
@@ -751,10 +757,33 @@ class Bot:
         """Claude's login is gone: messages wait, in order, until _check_login sees it back."""
         state = self._state(key)
         first = not state.login_lost_at
+        if first and time.time() - state.login_retried_at > 3600:  # a new run of failures
+            state.login_retries = 0
+        # The login looks fine, so it's the request that was turned down (Cloudflare's "Attention Required"):
+        # it's tried again a few times before asking for a /login.
+        refused = (first or state.login_retry_at) and state.login_retries < len(REFUSED_RETRIES) and usage.login_valid()
+        if state.login_retry_at and not refused:
+            first = True  # the retries are over: now it's the login
         state.held = items + state.held
-        if cut and LOGIN_CONTINUE_PROMPT not in (m["text"] for m in state.held):
-            state.held.insert(0, {"text": LOGIN_CONTINUE_PROMPT, "ids": []})
+        prompt = REFUSED_CONTINUE_PROMPT if refused else LOGIN_CONTINUE_PROMPT
+        if cut and not any(m["text"] in (REFUSED_CONTINUE_PROMPT, LOGIN_CONTINUE_PROMPT) for m in state.held):
+            state.held.insert(0, {"text": prompt, "ids": []})
         state.login_lost_at = time.time()
+        if refused and (first or not state.login_retry_at):
+            wait = REFUSED_RETRIES[state.login_retries]
+            state.login_retries += 1
+            state.login_retry_at = time.time() + wait
+            self.store.put(key, state)
+            await self._output(key).notice(
+                f"🌩 Anthropic's servers turned the request down (often Cloudflare blocking it for a while), "
+                f"though Claude's login looks fine. Trying again in {wait // 60} min "
+                f"({state.login_retries}/{len(REFUSED_RETRIES)}); /stop drops it."
+            )
+            return
+        if refused:
+            self.store.put(key, state)
+            return
+        state.login_retry_at = 0.0
         self.store.put(key, state)
         if first:
             n = len(state.held) - cut
@@ -769,12 +798,19 @@ class Bot:
         """Once Claude has a login again (from /login or on the machine), what waited for it goes."""
         sess = self.sessions.get(key)
         state = sess.state if sess else state
-        if not state.login_lost_at or not usage.renewed_since(state.login_lost_at):
+        if not state.login_lost_at:
             return
-        state.login_lost_at = 0.0
+        if state.login_retry_at and time.time() >= state.login_retry_at:  # turned down a while ago: try again
+            state.login_retried_at = time.time()
+        elif not usage.renewed_since(state.login_lost_at):
+            return
+        else:
+            state.login_retries = 0
+        retry = bool(state.login_retry_at)
+        state.login_lost_at = state.login_retry_at = 0.0
         self.store.put(key, state)
         if state.held:
-            await self._output(key).notice("🔑 Claude's login is back: going on")
+            await self._output(key).notice("🌩 Trying again" if retry else "🔑 Claude's login is back: going on")
             await self._release(key)
 
     async def _check_limit(self, key: Key, state: ConvState) -> None:
@@ -1470,6 +1506,7 @@ class Bot:
         # The new conversation gets them.
         state.held, state.limit_until, state.limit_auto = old.held, old.limit_until, old.limit_auto
         state.login_lost_at, state.agent_sends = old.login_lost_at, old.agent_sends
+        state.login_retry_at, state.login_retries = old.login_retry_at, old.login_retries
         self.store.put(key, state)
         if old.prompt:
             try:
@@ -1643,6 +1680,7 @@ class Bot:
         state = self._state(key)
         cut = state.limit_cut
         state.limit_auto, state.login_lost_at = "", 0.0  # with nothing waiting, the next message finds out
+        state.login_retry_at, state.login_retries = 0.0, 0
         if state.held or cut:  # held back by a warning, or waiting for a plan limit: dropped too
             dropped += len(state.held)
             state.held, state.limit_cut = [], False
@@ -1780,7 +1818,10 @@ class Bot:
         key = self._key(update)
         sess = self.sessions.get(key)
         state = sess.state if sess else self._state(key)
-        if state.login_lost_at:
+        if state.login_retry_at:
+            mins = max(0, int(state.login_retry_at - time.time()) // 60)
+            activity = f"turned down by Anthropic's servers, trying again in {mins} min"
+        elif state.login_lost_at:
             activity = "waiting for /login"
         elif state.limit_until:
             activity = "stopped by a plan limit" + (", goes on when it lifts" if state.limit_auto else "")

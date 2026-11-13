@@ -67,6 +67,15 @@ def _login() -> dict:
         raise Unavailable("no Claude subscription login found (API keys have no plan limits)") from None
 
 
+def login_valid() -> bool:
+    """Whether the login on this machine has a token that hasn't expired (the server may still turn it down)."""
+    try:
+        login = _login()
+        return bool(login.get("accessToken") and login.get("expiresAt", 0) / 1000 > time.time())
+    except Unavailable:
+        return False
+
+
 def renewed_since(when: float) -> bool:
     """Whether there is a good login written after that moment (a failed refresh can write one without a token)."""
     try:

@@ -223,6 +223,9 @@ All this survives a restart too, and `/stop` drops it.
 If Claude's login expires and can't be refreshed, it's the same: nothing reaches Claude and
 nothing is lost. `/login` renews it from Telegram (open the address it gives, send back the
 code that page shows), and what waited goes on by itself; so it does after a login on the machine.
+If the login looks fine and the request was turned down anyway (a 403 from Cloudflare in front of
+Anthropic's servers, often for a few minutes), the bot tries again by itself after 2, 5 and 15 minutes
+before asking for `/login`.
 
 Each topic's name shows how it stands, e.g. `⚙️·7️⃣·30m·web·🧐·📨2`: ⚙️ working, ❓ waiting for
 your permission, 🔑 waiting for `/login`, ⏸ stopped by a plan limit, 🟢 awake and waiting for you or 💤 asleep; tenths of the room left
