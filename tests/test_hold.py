@@ -834,3 +834,27 @@ async def test_tldr_shows_the_projects_summary(bot, tmp_path, monkeypatch):
     (tmp_path / "TLDR.md").write_text("**App** does things.\n")
     await bot._cmd_tldr(None, None)
     assert bot.out.sent[-1][0] == "📝 **App** does things."  # Markdown, rendered by text()
+
+
+async def test_sleep_lets_the_cache_go_until_the_next_message(bot, monkeypatch):
+    monkeypatch.setattr(Bot, "_assigned", lambda self, key: True)
+    monkeypatch.setattr(Bot, "_key", staticmethod(lambda u: KEY))
+
+    async def ready(self, key):
+        return True
+
+    monkeypatch.setattr(Bot, "_ready", ready)
+    bot.cfg.keepalive, bot.cfg.cache_alarms, bot.alarms = 3600, (5,), {}
+    state = bot.store.get(KEY)
+    state.last_api_at, state.context_tokens = time.time() - 3400, 40_000  # 2 min left
+    state.last_active = state.last_api_at
+    state.wakeups = [{"id": "w", "at": time.time() + 600}]
+    await bot._cmd_sleep(SimpleNamespace(), None)
+    assert state.asleep and state.wakeups == [] and "💤" in bot.out.notices[-1] and "alarm" in bot.out.notices[-1]
+    await bot._check_alarm(KEY, state)
+    assert KEY not in bot.alarms
+    bot.hold = False
+    await bot._submit(KEY, "back")
+    assert not state.asleep
+    await bot._check_alarm(KEY, state)
+    assert bot.alarms[KEY]["step"] == 5

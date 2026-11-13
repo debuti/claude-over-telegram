@@ -63,6 +63,7 @@ COMMANDS = [
     ("menu", "settings and commands with buttons"),
     ("help", "list commands"),
     ("new", "start a fresh conversation"),
+    ("sleep", "let this conversation sleep: no cache warnings or keep-alives"),
     ("list", "recent conversations in this folder"),
     ("older", "older conversations in this folder"),
     ("resume", "go back to a past conversation"),
@@ -143,6 +144,7 @@ MENU_COMMANDS = {
     "cost": "cost",
     "usage": "usage",
     "new": "new",
+    "sleep": "sleep",
     "list": "resume",
     "server": "server",
     "stop": "stop",
@@ -151,7 +153,7 @@ MENU_COMMANDS = {
 }
 MENU_ACTIONS = [
     [("📊 Status", "status"), ("💰 Cost", "cost"), ("📈 Usage", "usage")],
-    [("📝 TLDR", "tldr"), ("🆕 New", "new"), ("📜 Past", "list")],
+    [("📝 TLDR", "tldr"), ("🆕 New", "new"), ("📜 Past", "list"), ("😴 Sleep", "sleep")],
     [("🖥 Server", "server"), ("❔ Help", "help"), ("🛑 Stop", "stop"), ("✖️ Close", "close")],
 ]
 
@@ -250,6 +252,7 @@ class Bot:
             MessageHandler(allowed & filters.StatusUpdate.FORUM_TOPIC_EDITED, self._on_topic_edited)
         )
         self.app.add_handler(CommandHandler("new", self._cmd_new, filters=allowed))
+        self.app.add_handler(CommandHandler("sleep", self._cmd_sleep, filters=allowed))
         self.app.add_handler(CommandHandler(["list", "older", "resume"], self._cmd_resume, filters=allowed))
         self.app.add_handler(CommandHandler("menu", self._cmd_menu, filters=allowed))
         self.app.add_handler(CommandHandler("tools", self._cmd_tools, filters=allowed))
@@ -444,6 +447,9 @@ class Bot:
             return
         self._remember(key, text, ids)
         state = self._state(key)
+        if state.asleep:  # a message wakes it up
+            state.asleep = False
+            self.store.put(key, state)
         # A warning or a plan limit is already holding some, or asking about the cut turn: this one waits too.
         if state.held or state.login_lost_at or (state.limit_cut and not state.limit_until):
             state.held.append({"text": text, "ids": ids or []})
@@ -1243,6 +1249,7 @@ class Bot:
         data = self._plan[1]
         if (
             not state.session_id
+            or state.asleep
             or state.login_lost_at
             or (state.limit_until and not self._reserve)
             or state.limit_cut
@@ -1282,6 +1289,10 @@ class Bot:
         if alarm and (alarm["at"] != state.last_api_at or not state.context_tokens):
             await self._delete_alarm(key)
             alarm = None
+        if state.asleep:  # /sleep: its cache may go
+            if alarm:
+                await self._delete_alarm(key)
+            return
         if not state.session_id or not state.last_api_at or (sess and sess.pending) or not self._assigned(key):
             return
         if not state.context_tokens:
@@ -1385,6 +1396,7 @@ class Bot:
                 and state.context_tokens >= self.cfg.wake_small
                 and not state.login_lost_at
                 and not state.limit_cut
+                and not state.asleep
                 and costguard.cache_left(now, state.last_api_at, self.ttl) > 0
                 and self._assigned(key)
             ):
@@ -1563,12 +1575,40 @@ class Bot:
             await sess.close()
         state = self._state(key)
         state.session_id = None
-        state.limit_cut = False  # that work stays in the old conversation
+        state.limit_cut = state.asleep = False  # that work stays in the old conversation
         state.cost_usd = 0.0
         state.context_tokens = state.after_compact = 0
         state.last_api_at = 0.0
         self.store.put(key, state)
         await self._output(key).notice(f"🆕 New conversation in {state.cwd}")
+
+    async def _cmd_sleep(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/sleep: done with this conversation for now. Its process stops and its cache is let go
+        (no warnings, keep-alives or alarms); the next message wakes it up as any asleep one."""
+        key = self._key(update)
+        if not await self._ready(key):
+            return
+        out = self._output(key)
+        sess = self.sessions.get(key)
+        state = sess.state if sess else self._state(key)
+        if sess and sess.pending:
+            await out.notice("⚠️ Claude is still working: /stop it first, or wait.")
+            return
+        if not state.session_id:
+            await out.notice("Nothing to put to sleep: there's no conversation here yet.")
+            return
+        self.sessions.pop(key, None)
+        if sess:
+            await sess.close()
+        await self._delete_alarm(key)
+        dropped = len(state.wakeups)
+        state.asleep, state.wakeups = True, []
+        self.store.put(key, state)
+        alarms = f" Its {dropped} alarm{'s' * (dropped > 1)} won't ring." if dropped else ""
+        await out.notice(
+            f"💤 Asleep: no more cache warnings or keep-alives here, its cache may go.{alarms} "
+            "Your next message wakes it up."
+        )
 
     async def _cmd_resume(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """/list shows the last few conversations here, /older more of them; /resume <n|id> switches to one."""
@@ -1622,7 +1662,7 @@ class Bot:
         if sess:
             await sess.close()
         state.session_id = session_id
-        state.limit_cut = False  # that work stays in the old conversation
+        state.limit_cut = state.asleep = False  # that work stays in the old conversation
         state.cost_usd = await asyncio.to_thread(transcript_cost, session_id)
         state.context_tokens, state.last_api_at = await asyncio.to_thread(transcript_context, session_id)
         state.after_compact = 0

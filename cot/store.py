@@ -43,6 +43,8 @@ class ConvState:
     catchup: str = ""
     # When Claude's login was found gone, while held messages wait for it to come back; else 0.
     login_lost_at: float = 0.0
+    # /sleep: no cache warnings, keep-alives or alarms until its next message.
+    asleep: bool = False
     # An "authentication failed" with a login that looks fine (a 403 from Cloudflare in front of the API):
     # when to try again (0 if it's the login itself that's gone), how many tries so far, and when the last one went.
     login_retry_at: float = 0.0

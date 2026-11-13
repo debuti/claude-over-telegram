@@ -245,6 +245,7 @@ turns it off.
 | `/help`    | List commands                                        |
 | `/cwd`     | Folder of this topic (a first-level folder)          |
 | `/new`     | Start a fresh conversation                           |
+| `/sleep`   | Done for now: no cache warnings, keep-alives, alarms |
 | `/list`    | Recent conversations in this folder, to resume       |
 | `/older`   | Older conversations in this folder (up to 30)        |
 | `/resume`  | `/resume <number or id>`: go back to one of them     |
