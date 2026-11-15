@@ -2037,7 +2037,6 @@ class Bot:
 
     async def _set_model(self, key: Key, model: str) -> None:
         sess = self._session(key)
-        before = sess.state.model
         try:
             await sess.set_model(None if model == "default" else model)
         except Exception as e:
@@ -2045,14 +2044,14 @@ class Bot:
             await sess.out.notice(f"⚠️ Could not change model: {e}")
             return
         await sess.out.notice(f"🧠 Model: {model} (applies from the next message)")
-        await self._limit_for_model(key, before)
+        await self._limit_for_model(key)
 
-    async def _limit_for_model(self, key: Key, before: str | None) -> None:
-        """A limit this conversation hit may be the old model's own (Fable's weekly one): with
-        another model, and no plan-wide limit or reserve stopping Claude, what waited goes now.
-        If the new model is limited too, the next turn says so again."""
+    async def _limit_for_model(self, key: Key) -> None:
+        """A limit this conversation hit may be one model's own (Fable's weekly one): once a model
+        is picked (the same one too, to try again), with no plan-wide limit or reserve stopping
+        Claude, what waited goes now. If that model is limited too, the next turn says so again."""
         state = self._state(key)
-        if not state.limit_until or state.model == before or await self._blocked():
+        if not state.limit_until or await self._blocked():
             return
         state.limit_until = 0.0
         if state.limit_cut:
@@ -2060,7 +2059,7 @@ class Bot:
             state.held.insert(0, {"text": CONTINUE_PROMPT, "ids": []})
         self.store.put(key, state)
         if state.held:
-            await self._output(key).notice("▶️ The limit was the previous model's: going on with this one")
+            await self._output(key).notice("▶️ The plan itself isn't stopped: trying again with this model")
         await self._release(key)
 
     async def _cmd_catchup(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
