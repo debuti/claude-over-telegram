@@ -2030,7 +2030,6 @@ class Bot:
         key = self._key(update)
         if not await self._ready(key):
             return
-        sess = self._session(key)
         if ctx.args:
             await self._set_model(key, ctx.args[0])
             return
