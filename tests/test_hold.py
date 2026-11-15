@@ -893,6 +893,24 @@ async def test_advanced_menu_pages(bot):
     assert any(b.callback_data == "menu:advanced" for row in markup.inline_keyboard for b in row)
 
 
+async def test_advisor_on_the_menu_and_in_the_title(bot):
+    bot.cfg.permission_mode = "auto"
+    query = Query("menu:main", None)
+    await bot._on_menu(None, None, KEY, query, "adv.advisor")
+    assert query.edited[-1].startswith("🧑‍🏫 Advisor: <b>None</b>")
+    await bot._on_menu(None, None, KEY, query, "adv.advisor=claude-fable-5-2")  # back to the main page
+    state = bot.store.get(KEY)
+    assert state.advanced["advisor"] == "claude-fable-5-2" and "Advanced" not in query.edited[-1]
+    text, markup = bot._menu(KEY)
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert "🧑‍🏫 Fable 5.2" in labels
+    state.model = "claude-opus-5-5"
+    bot.cfg.compact_at, state.title = 0, "web"
+    assert bot._title(KEY, state).endswith("·🧐(🤓)")
+    page, _ = bot._advanced_page(KEY)
+    assert "Advisor" not in page
+
+
 
 def _fable_limited(bot, plan):
     """Fable hit its own weekly limit (resetting far ahead), then the user picked Opus."""

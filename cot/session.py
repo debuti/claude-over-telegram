@@ -238,6 +238,8 @@ class Session:
             "fallback_model": fallback if fallback != self.state.model else None,
             "max_turns": int(a["turns"]) if a.get("turns") else None,
             "max_budget_usd": float(a["budget"]) if a.get("budget") else None,
+            # A stronger model the main one may consult (Claude Code's server-side advisor tool).
+            "extra_args": {"advisor": a["advisor"]} if a.get("advisor") else {},
         }
 
     def _options(self) -> ClaudeAgentOptions:

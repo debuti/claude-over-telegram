@@ -77,7 +77,7 @@ COMMANDS = [
     ("mode", "permission mode"),
     ("model", "switch model"),
     ("catchup", "go on by itself when a plan limit lifts"),
-    ("advanced", "effort, thinking, fallback model, limits, blocked tools"),
+    ("advanced", "effort, thinking, fallback model, advisor, limits, blocked tools"),
     ("status", "what's going on"),
     ("tldr", "what this project is and what each part does"),
     ("cost", "estimated cost of this conversation"),
@@ -201,6 +201,8 @@ ADVANCED = {
     ),
     "thinking": ("💭", "Thinking", [("-", "Default"), ("adaptive", "Adaptive"), ("off", "Off")]),
     "fallback": ("🪂", "Fallback model", [("-", "None"), *MODELS.items()]),
+    # On /menu's main page, next to the model, not on the advanced one.
+    "advisor": ("🧑‍🏫", "Advisor", [("-", "None"), *MODELS.items()]),
     "turns": ("🔁", "Max turns per message", [("-", "No limit"), *((n, n) for n in ("10", "25", "50", "100"))]),
     "budget": (
         "💵",
@@ -1472,6 +1474,8 @@ class Bot:
         cache = titles.cache(self._cache_lasts(state)) if state.last_api_at and state.context_tokens else ""
         queued = (sess.queued if sess else len(state.pending)) + len(state.held) + len(state.for_alarm)
         model = titles.model(state.model or state.last_model)
+        if advisor := titles.model(state.advanced.get("advisor")):
+            model += f"({advisor})"
         return titles.compose(state.title, status, room, cache, queued, model)
 
     def _cache_lasts(self, state: ConvState) -> float:
@@ -2113,6 +2117,9 @@ class Bot:
             heading, _ = self._picker(key, what)
             value = re.sub(r"<[^>]+>", "", heading.partition(": ")[2])
             settings.append(InlineKeyboardButton(f"{icon} {value}", callback_data=f"menu:{what}"))
+        icon = ADVANCED["advisor"][0]
+        settings.insert(1, InlineKeyboardButton(f"{icon} {self._advanced_shown(key, 'advisor')}",
+                                                callback_data="menu:adv.advisor"))
         settings.append(InlineKeyboardButton("🔧 Advanced", callback_data="menu:advanced"))
         rows = [settings[:2], settings[2:4], settings[4:]] + [
             [InlineKeyboardButton(label, callback_data=f"menu:{cmd}") for label, cmd in row] for row in MENU_ACTIONS
@@ -2138,7 +2145,9 @@ class Bot:
             if value:
                 await self._set_advanced(key, name, value)
             # A choice goes back to the settings, but tools are toggled on their own page.
-            if page == "advanced" or (value and name != "block"):
+            if value and name == "advisor":
+                text, markup = self._menu(key)
+            elif page == "advanced" or (value and name != "block"):
                 text, markup = self._advanced_page(key)
             else:
                 text, markup = self._advanced_picker(key, name)
@@ -2180,6 +2189,7 @@ class Bot:
         rows = [
             [InlineKeyboardButton(f"{icon} {title}: {self._advanced_shown(key, n)}", callback_data=f"menu:adv.{n}")]
             for n, (icon, title, _) in ADVANCED.items()
+            if n != "advisor"
         ]
         rows.append([InlineKeyboardButton("‹ Back", callback_data="menu:main")])
         text = "🔧 <b>Advanced</b>\nChanges start Claude again (resuming) before the next message."
@@ -2194,11 +2204,12 @@ class Bot:
         else:
             marks = {v: "● " if v == (current or "-") else "" for v, _ in options}
         rows = [[InlineKeyboardButton(marks[v] + label, callback_data=f"menu:adv.{name}={v}")] for v, label in options]
-        rows.append([InlineKeyboardButton("‹ Back", callback_data="menu:advanced")])
+        back = "menu:main" if name == "advisor" else "menu:advanced"
+        rows.append([InlineKeyboardButton("‹ Back", callback_data=back)])
         return f"{icon} {title}: <b>{esc(self._advanced_shown(key, name))}</b>", InlineKeyboardMarkup(rows)
 
     async def _cmd_advanced(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """/advanced [setting value]: effort, thinking, fallback model, limits and blocked tools."""
+        """/advanced [setting value]: effort, thinking, fallback model, advisor, limits and blocked tools."""
         key = self._key(update)
         if not await self._ready(key):
             return

@@ -71,5 +71,6 @@ def test_the_model_goes_after_the_name():
     assert titles.model(None) == titles.model("gpt") == ""
     assert titles.compose("web", "⚙️", model="🤓", queued=2) == "⚙️·web·🤓·📨2"
     assert titles.plain("🟢·web·🤓") == "web"
+    assert titles.plain("🟢·web·🧐(🤓)·📨2") == "web"
     for icon in titles.MODELS.values():
         assert icon in titles.LEGEND

@@ -258,7 +258,7 @@ turns it off.
 | `/mode`    | Permission mode (default, acceptEdits, plan, auto…)  |
 | `/model`   | Switch model                                         |
 | `/catchup` | Go on by itself when a plan limit lifts: `auto`, `compact` or `ask` (default) |
-| `/advanced` | Effort, thinking, fallback model, limits, blocked tools (also in `/menu`) |
+| `/advanced` | Effort, thinking, fallback model, advisor, limits, blocked tools (also in `/menu`) |
 | `/status`  | Workdir, mode, model, activity, context usage        |
 | `/cost`    | Estimated cost of the conversation                   |
 | `/usage`   | Plan usage: 5-hour and weekly limits                 |
@@ -267,7 +267,7 @@ turns it off.
 | `/server`  | Machine health: load, CPU, memory, disk, busiest processes |
 | `/…`       | Anything else is passed to Claude (e.g. `/compact`)  |
 
-`/menu` sends a panel to use with your thumb: the model, tool activity, permission mode
+`/menu` sends a panel to use with your thumb: the model, its advisor, tool activity, permission mode
 and what happens after a plan limit, each showing its current value and opening its choices
 in the same message, then buttons for the commands above. Close takes the buttons off.
 
@@ -276,6 +276,8 @@ each kept per conversation and unset by default (Claude Code's own choice):
 - `effort`: how hard Claude thinks, `low` to `max`; lower is faster and uses less of the plan.
 - `thinking`: `adaptive` or `off`.
 - `fallback`: the model to use when the main one is overloaded.
+- `advisor`: a stronger model the main one may consult (Claude Code's advisor tool); it's on
+  `/menu`'s main page, and in the topic's name after the model, in brackets: 🧐(🤓) is Opus advised by Fable.
 - `turns`: at most this many steps (tool calls) per message, then it stops.
 - `budget`: Claude stops once its process has spent this many dollars (estimated);
   the process lasts from a message until it goes idle.

@@ -5,7 +5,7 @@ import re
 KEYCAPS = ("0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟")
 WORKING, ASKING, LOGIN, LIMITED, IDLE, ASLEEP = "⚙️", "❓", "🔑", "⏸", "🟢", "💤"
 COLD, QUEUED, ALARM = "🧊", "📨", "⏰"  # ALARM: asleep until an alarm it asked for
-# The model answering, after the name: by family, whatever the version.
+# The model answering, after the name: by family, whatever the version; its advisor, if any, in brackets.
 MODELS = {"haiku": "😵‍💫", "sonnet": "🙂", "opus": "🧐", "fable": "🤓"}
 # Telegram posts a service message per rename, so the cache's time moves in steps (minutes), never
 # overstating what's left.
@@ -22,13 +22,15 @@ LEGEND = (
     f"30m until the prompt cache is lost, at least, keep-alives included; {COLD} gone: the next message re-sends all; "
     "neither just after compacting: there's nothing to lose\n"
     "web the topic's name\n"
-    f"{MODELS['haiku']} Haiku, {MODELS['sonnet']} Sonnet, {MODELS['opus']} Opus, {MODELS['fable']} Fable: the model\n"
+    f"{MODELS['haiku']} Haiku, {MODELS['sonnet']} Sonnet, {MODELS['opus']} Opus, {MODELS['fable']} Fable: the model; "
+    f"{MODELS['opus']}({MODELS['fable']}) Opus with Fable as its advisor\n"
     f"{QUEUED}2 messages waiting for Claude"
 )
 
+_MODEL_ICON = "|".join(map(re.escape, MODELS.values()))
 _STATUS_FIELD = re.compile(
-    "|".join(map(re.escape, (WORKING, ASKING, LOGIN, LIMITED, IDLE, ASLEEP, ALARM, COLD, *KEYCAPS, *MODELS.values())))
-    + rf"|>?\d+m|{QUEUED}\d+"
+    "|".join(map(re.escape, (WORKING, ASKING, LOGIN, LIMITED, IDLE, ASLEEP, ALARM, COLD, *KEYCAPS)))
+    + rf"|(?:{_MODEL_ICON})(?:\((?:{_MODEL_ICON})\))?|>?\d+m|{QUEUED}\d+"
 )
 
 
