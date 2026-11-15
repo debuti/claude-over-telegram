@@ -39,6 +39,8 @@ class ConvState:
     limit_cut: bool = False
     # Asked in advance to go on when a plan limit lifts, without asking again: "send" or "compact".
     limit_auto: str = ""
+    # The model (or "default") that last hit a plan limit; "?" if not known. Another one may go on.
+    limit_model: str = "?"
     # /catchup: what every plan limit gets without asking, as limit_auto; "" asks each time.
     catchup: str = ""
     # When Claude's login was found gone, while held messages wait for it to come back; else 0.

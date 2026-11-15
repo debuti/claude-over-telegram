@@ -252,3 +252,16 @@ def blocked(data: dict) -> str | None:
     if not full:
         return None
     return max(lim.get("resets_at") or "" for lim in full)
+
+
+def model_blocked(data: dict, label: str | None) -> bool:
+    """Whether a weekly limit of one model's own (Fable's) is used up for the model shown as
+    `label` ("Fable 5.2"); for an unknown model (None), whether any such limit is."""
+    for lim in data.get("limits") or []:
+        model = (lim.get("scope") or {}).get("model")
+        name = model.get("display_name") if isinstance(model, dict) else None
+        if lim.get("kind") != "weekly_scoped" or not name or (lim.get("percent") or 0) < 100:
+            continue
+        if label is None or name.lower() in label.lower() or label.lower() in name.lower():
+            return True
+    return False

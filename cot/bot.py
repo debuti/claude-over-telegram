@@ -481,7 +481,7 @@ class Bot:
         sess.on_turn_start = lambda: self.usage_log.turn_started(key)
         sess.on_turn_end = lambda entry: self._log_turn(key, sess, entry)
         sess.on_turn_failed = lambda: self.usage_log.turn_failed(key)
-        sess.on_limited = lambda items, resets, cut: self._on_limited(key, items, resets, cut)
+        sess.on_limited = lambda items, resets, cut: self._hit_limit(key, items, resets, cut)
         if not self.cfg.api_key:  # a wrong API key won't come back on its own: its error says so
             sess.on_login_lost = lambda items, cut: self._on_login_lost(key, items, cut)
         sess.agents = tg_tools.Agents(
@@ -896,6 +896,12 @@ class Bot:
             return False
         return costguard.is_cold(time.time(), state.last_api_at or state.last_active, self.ttl)
 
+    async def _hit_limit(self, key: Key, items: list[dict], resets: float | None, cut: bool = False) -> None:
+        """Claude itself ran into a plan limit: with the model it was on, which another may not share."""
+        state = self._state(key)
+        state.limit_model = state.model or "default"
+        await self._on_limited(key, items, resets, cut)
+
     async def _on_limited(
         self,
         key: Key,
@@ -1007,7 +1013,9 @@ class Bot:
         """Once the plan limit is gone, ask whether the messages that waited for it still go."""
         sess = self.sessions.get(key)
         state = sess.state if sess else state
-        if not state.limit_until or time.time() < state.limit_until or await self._blocked():
+        if not state.limit_until or await self._blocked():
+            return
+        if time.time() < state.limit_until and not await self._model_free(state):
             return
         if state.limit_auto and (state.held or state.limit_cut):
             await self._go_on(key, state)
@@ -1030,6 +1038,14 @@ class Bot:
             self._session(key).compact_next = True
         await self._output(key).notice("✅ The plan limit has lifted: going on, as you asked")
         await self._release(key)
+
+    async def _model_free(self, state: ConvState) -> bool:
+        """The limit this conversation hit was its old model's own (Fable's weekly one): the model
+        it is on now isn't stopped. Tried once: if it hits a limit too, that one becomes limit_model."""
+        if (state.model or "default") == state.limit_model:
+            return False
+        data = await self._plan_data()
+        return not data or not usage.model_blocked(data, MODELS.get(state.model) if state.model else None)
 
     def _limit_prompt(self, key: Key, state: ConvState) -> tuple[str, list[list[tuple[str, str]]]]:
         """The question once the limit is gone. Going on with a cut turn stays in this conversation,
@@ -2044,23 +2060,6 @@ class Bot:
             await sess.out.notice(f"⚠️ Could not change model: {e}")
             return
         await sess.out.notice(f"🧠 Model: {model} (applies from the next message)")
-        await self._limit_for_model(key)
-
-    async def _limit_for_model(self, key: Key) -> None:
-        """A limit this conversation hit may be one model's own (Fable's weekly one): once a model
-        is picked (the same one too, to try again), with no plan-wide limit or reserve stopping
-        Claude, what waited goes now. If that model is limited too, the next turn says so again."""
-        state = self._state(key)
-        if not state.limit_until or await self._blocked():
-            return
-        state.limit_until = 0.0
-        if state.limit_cut:
-            state.limit_cut = False
-            state.held.insert(0, {"text": CONTINUE_PROMPT, "ids": []})
-        self.store.put(key, state)
-        if state.held:
-            await self._output(key).notice("▶️ The plan itself isn't stopped: trying again with this model")
-        await self._release(key)
 
     async def _cmd_catchup(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """/catchup [auto|compact|ask]: whether the conversation goes on by itself when a plan limit lifts."""

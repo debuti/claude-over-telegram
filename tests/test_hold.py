@@ -893,31 +893,54 @@ async def test_advanced_menu_pages(bot):
     assert any(b.callback_data == "menu:advanced" for row in markup.inline_keyboard for b in row)
 
 
-def _with_model(bot, model):
-    state = bot.store.get(KEY)
-    state.model = model
-    bot.store.put(KEY, state)
 
-    async def set_model(m):
-        s = bot.store.get(KEY)
-        s.model = m
-        bot.store.put(KEY, s)
-    bot.sess.state, bot.sess.set_model, bot.sess.out = state, set_model, bot.out
+def _fable_limited(bot, plan):
+    """Fable hit its own weekly limit (resetting far ahead), then the user picked Opus."""
+    state = bot.store.get(KEY)
+    state.model = "claude-fable-5-2"
+    bot.store.put(KEY, state)
+    bot.sessions = {}
+
+    async def plan_data():
+        return plan
+    bot._plan_data = plan_data
+    return state
+
+
+FABLE_FULL = {"limits": [{"kind": "weekly_scoped", "percent": 100,
+                          "scope": {"model": {"display_name": "Fable"}}}]}
 
 
 async def test_other_model_goes_on_past_the_old_ones_limit(limit):
-    """Fable's own weekly limit stopped it; the plan isn't stopped, so Opus takes what waited."""
-    _with_model(limit, "claude-fable-5-2")
-    await limit._on_limited(KEY, [{"text": "one", "ids": []}], 9e9, cut=True)
+    _fable_limited(limit, FABLE_FULL)
+    await limit._hit_limit(KEY, [{"text": "one", "ids": []}], 9e9, cut=True)
     limit.limit = False
-    await limit._set_model(KEY, "claude-opus-5-5")
     state = limit.store.get(KEY)
+    await limit._check_limit(KEY, state)
+    assert limit.delivered == []  # still on Fable: it waits
+    state.model = "claude-opus-5-5"
+    limit.store.put(KEY, state)
+    await limit._check_limit(KEY, state)
+    assert state.limit_until == 0 and state.prompt["kind"] == "limit"
+    query, rest = tap(limit, "send")
+    await limit._on_guard(KEY, query, rest)
     assert limit.delivered == [CONTINUE_PROMPT, "one"]
-    assert state.limit_until == 0 and not state.limit_cut and state.held == []
+
+
+async def test_other_model_waits_while_its_own_limit_is_used_up_too(limit):
+    _fable_limited(limit, FABLE_FULL)
+    await limit._hit_limit(KEY, [{"text": "one", "ids": []}], 9e9)
+    limit.limit = False
+    state = limit.store.get(KEY)
+    state.model = "claude-fable-5-1"
+    await limit._check_limit(KEY, state)
+    assert state.limit_until == 9e9 and limit.delivered == []
 
 
 async def test_other_model_still_waits_for_a_plan_wide_limit(limit):
-    _with_model(limit, "claude-fable-5-2")
-    await limit._on_limited(KEY, [{"text": "one", "ids": []}], 9e9)
-    await limit._set_model(KEY, "claude-opus-5-5")
-    assert limit.delivered == [] and limit.store.get(KEY).limit_until == 9e9
+    _fable_limited(limit, {"limits": []})
+    await limit._hit_limit(KEY, [{"text": "one", "ids": []}], 9e9)
+    state = limit.store.get(KEY)
+    state.model = "claude-opus-5-5"
+    await limit._check_limit(KEY, state)
+    assert state.limit_until == 9e9 and limit.delivered == []
