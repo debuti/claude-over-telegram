@@ -363,3 +363,54 @@ def test_alarms_lists_them_with_cancel_buttons(bot):
     asyncio.run(bot._cmd_alarms(None, None))
     assert "every 1 h (rung 0)" in bot.posted[-1] and "waiting for your OK" in bot.posted[-1]
     assert len(bot.asked[-1].inline_keyboard) == 2
+
+
+def alarm(bot, text):
+    asyncio.run(bot._cmd_alarm(None, SimpleNamespace(args=text.split())))
+
+
+@pytest.fixture
+def ready(bot, monkeypatch):
+    async def ready(self, key):
+        return True
+
+    monkeypatch.setattr(Bot, "_ready", ready)
+    return bot
+
+
+def test_parse_alarm():
+    from cot.bot import _parse_alarm
+
+    now = time.mktime((2026, 11, 15, 10, 0, 0, 0, 0, -1))
+    assert _parse_alarm(["90", "look"], now) == (now + 90 * 60, None, "look")
+    assert _parse_alarm(["1h30m", "every", "2h", "a", "b"], now) == (now + 90 * 60, 120, "a b")
+    assert _parse_alarm(["09:00", "daily", "x"], now) == (now + 23 * 3600, 1440, "x")
+    assert _parse_alarm(["11:30", "x"], now)[0] == now + 90 * 60
+    for bad in (["x"], ["90"], ["25:00", "x"], ["8d", "x"], ["1h", "every", "5m", "x"], []):
+        with pytest.raises(ValueError):
+            _parse_alarm(bad, now)
+
+
+def test_the_users_alarm_is_set_at_once_and_tells_claude(ready, monkeypatch):
+    bot = ready
+    alarm(bot, "2h every 1d check the backups")
+    [wake] = bot.store.get(ME).wakeups
+    assert wake["user"] and wake["at"] and "then every 24 h" in bot.posted[-1] and "cancel" in button(bot.asked[-1])
+    assert not bot._alarm_asleep(ME)  # Claude isn't put to sleep for it, messages don't wait
+    start = time.time()
+    monkeypatch.setattr(time, "time", lambda: start + 2 * 3600 + 1)
+    ring(bot)
+    [(_, text, _, hold)] = bot.submitted
+    assert "the user set with /alarm rang (every 24 h, 1 time(s) so far)" in text and "check the backups" in text
+    assert not hold and bot.store.get(ME).wakeups and "next at" in bot.posted[-1]
+    alarm(bot, "soon")
+    assert "When?" in bot.posted[-1]
+
+
+def test_the_users_alarms_dont_count_against_claudes(ready):
+    bot = ready
+    for _ in range(3):
+        alarm(bot, "1h x")
+    ask(bot)
+    asyncio.run(bot._cmd_alarms(None, None))
+    assert bot.posted[-1].count("yours, ") == 3

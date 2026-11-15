@@ -295,7 +295,7 @@ class Session:
     @property
     def alarm_set(self) -> bool:
         """An approved alarm will wake it: what runs in its container (the tests it waits for) must live on."""
-        return any(w.get("at") for w in self.state.wakeups)
+        return any(w.get("at") and not w.get("user") for w in self.state.wakeups)
 
     async def _end_process(self) -> None:
         """Claude's process goes; its container too, unless an alarm is set or something runs in it."""

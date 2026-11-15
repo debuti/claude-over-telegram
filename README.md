@@ -247,7 +247,8 @@ turns it off.
 | `/new`     | Start a fresh conversation                           |
 | `/sleep`   | Done for now: no cache warnings, keep-alives, alarms |
 | `/wake`    | Ring the next alarm now, with the messages waiting for it |
-| `/alarms`  | The alarms asked for or set here, to cancel them     |
+| `/alarm`   | `/alarm 09:00 daily <text>`: tell Claude something later, once or again and again |
+| `/alarms`  | The alarms set here, to cancel them                  |
 | `/list`    | Recent conversations in this folder, to resume       |
 | `/older`   | Older conversations in this folder (up to 30)        |
 | `/resume`  | `/resume <number or id>`: go back to one of them     |
@@ -344,6 +345,12 @@ Each ring shows how many so far, when the next one is and a 🔕 Cancel button; 
 missed while the bot was down don't all come at once. Between rings the conversation
 is as usual: your messages reach Claude, they don't wait for it.
 `/alarms` lists the alarms of a conversation, asked for or set, each with a button to cancel it.
+
+You can set your own too, with no button to approve: `/alarm <when> [every <interval> | daily] <text>`,
+where *when* is minutes (`90`), `45m`, `2h`, `1d`, `1h30m` or a time (`09:00`, the next one), e.g.
+`/alarm 09:00 daily summarise yesterday's errors in app.log`. When it rings Claude gets the text,
+as from you. Up to 10 per conversation, apart from Claude's 3; they don't put Claude to sleep nor
+hold your messages, and `/wake` leaves them alone.
 
 ## Parallel conversations
 
