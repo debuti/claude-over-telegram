@@ -1,6 +1,7 @@
 """Telegram side: authorization, commands and routing messages to sessions."""
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -83,6 +84,7 @@ COMMANDS = [
     ("usage", "plan usage limits (5-hour and weekly)"),
     ("login", "renew Claude's login from here"),
     ("server", "load of the machine the bot runs on"),
+    ("restart", "restart the bot (takes up a git pull)"),
 ]
 
 # /tldr: the summary Claude keeps at the root of each project, and how much of it fits a message.
@@ -128,6 +130,7 @@ ALARM_USAGE = (
     "e.g. /alarm 09:00 daily summarise yesterday's errors in app.log"
 )
 RESERVE_NAMES = {"session": "5-hour", "weekly_all": "weekly"}
+RESTART_FILE = "restarted"  # in the state dir: the topic a /restart came from, told when the bot is back
 VERSION_NOTICE_TRIES = 3  # conversations to try the "new version" notice in
 
 # What goes to Claude, ahead of any waiting messages, to carry on with a turn a lost login cut short.
@@ -307,6 +310,7 @@ class Bot:
         self.login: login.Login | None = None
         self.ttl = costguard.cache_ttl(cfg)
         self._restarting = False
+        self._started = time.time()  # a /restart sent before it is one already done
         # The cache alarm last sent per conversation: {"at": last_api_at it counts from, "step", "msg_id"}.
         self.alarms: dict[Key, dict] = {}
         self._alarm_task: asyncio.Task | None = None
@@ -349,6 +353,7 @@ class Bot:
         self.app.add_handler(CommandHandler("wake", self._cmd_wake, filters=allowed))
         self.app.add_handler(CommandHandler("alarms", self._cmd_alarms, filters=allowed))
         self.app.add_handler(CommandHandler("alarm", self._cmd_alarm, filters=allowed))
+        self.app.add_handler(CommandHandler("restart", self._cmd_restart, filters=allowed))
         self.app.add_handler(CommandHandler(["list", "older", "resume"], self._cmd_resume, filters=allowed))
         self.app.add_handler(CommandHandler("menu", self._cmd_menu, filters=allowed))
         self.app.add_handler(CommandHandler("tools", self._cmd_tools, filters=allowed))
@@ -1316,6 +1321,7 @@ class Bot:
         # Fills Telegram's command menu (the "/" button).
         await app.bot.set_my_commands([BotCommand(name, desc) for name, desc in COMMANDS])
         await self._announce_version()
+        await self._announce_restart()
         # Messages that were waiting for Claude when the bot stopped.
         for key, state in self.store.items():
             for item in state.pending + state.held + state.for_alarm:  # sent before the restart
@@ -1336,6 +1342,38 @@ class Bot:
             if state.held and self._assigned(key) and not limit and not state.login_lost_at:
                 await self._ask_hold(key)
         self._alarm_task = asyncio.create_task(self._alarm_loop())
+
+    async def _cmd_restart(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/restart [now]: the bot starts again, as at its daily restart; with Claude working, only with now."""
+        msg = update.message
+        if msg and msg.date.timestamp() < self._started - 5:  # handled by the process before this one
+            return
+        key = self._key(update)
+        out = self._output(key)
+        working = sum(1 for sess in self.sessions.values() if sess.pending)
+        if working and [a.lower() for a in ctx.args or []] != ["now"]:
+            await out.notice(
+                f"⚠️ Claude is working in {working} conversation(s): restarting cuts that short. "
+                "/restart now to do it anyway."
+            )
+            return
+        (self.cfg.state_dir / RESTART_FILE).write_text(json.dumps(list(key)))
+        await out.notice("♻️ Restarting…")
+        log.info("restart asked from Telegram")
+        self._restarting = True
+        self.app.stop_running()
+
+    async def _announce_restart(self) -> None:
+        """Back from a /restart: said where it was asked."""
+        path = self.cfg.state_dir / RESTART_FILE
+        if not path.exists():
+            return
+        try:
+            key = tuple(json.loads(path.read_text()))
+            await self._output(key).notice(f"✅ Back, v{__version__}")
+        except Exception:
+            log.exception("restart notice failed")
+        path.unlink(missing_ok=True)
 
     async def _announce_version(self) -> None:
         """Says once, quietly, that a new version is running; restarts on the same one say nothing."""

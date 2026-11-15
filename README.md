@@ -183,7 +183,7 @@ Day-to-day commands:
 
 ```sh
 systemctl --user status claude-over-telegram
-systemctl --user restart claude-over-telegram    # e.g. after git pull
+systemctl --user restart claude-over-telegram    # e.g. after git pull (or /restart from Telegram)
 journalctl --user -u claude-over-telegram -f      # log
 ```
 
@@ -247,6 +247,7 @@ turns it off.
 | `/new`     | Start a fresh conversation                           |
 | `/sleep`   | Done for now: no cache warnings, keep-alives, alarms |
 | `/wake`    | Ring the next alarm now, with the messages waiting for it |
+| `/restart` | Restart the bot (e.g. after a `git pull`); while Claude works, only as `/restart now` |
 | `/alarm`   | `/alarm 09:00 daily <text>`: tell Claude something later, once or again and again |
 | `/alarms`  | The alarms set here, to cancel them                  |
 | `/list`    | Recent conversations in this folder, to resume       |

@@ -414,3 +414,22 @@ def test_the_users_alarms_dont_count_against_claudes(ready):
     ask(bot)
     asyncio.run(bot._cmd_alarms(None, None))
     assert bot.posted[-1].count("yours, ") == 3
+
+
+def test_restart_stops_the_bot_and_says_so_when_back(bot, tmp_path):
+    from datetime import datetime
+
+    stopped = []
+    bot.cfg.state_dir, bot._started, bot._restarting = tmp_path, time.time(), False
+    bot.app = SimpleNamespace(stop_running=lambda: stopped.append(1))
+    bot.sessions = {ME: SimpleNamespace(pending=True)}
+    update = SimpleNamespace(message=SimpleNamespace(date=datetime.now()))
+    asyncio.run(bot._cmd_restart(update, SimpleNamespace(args=[])))
+    assert "/restart now" in bot.posted[-1] and not stopped  # Claude is working
+    asyncio.run(bot._cmd_restart(update, SimpleNamespace(args=["now"])))
+    assert stopped and bot._restarting
+    old = SimpleNamespace(message=SimpleNamespace(date=datetime.fromtimestamp(time.time() - 60)))
+    asyncio.run(bot._cmd_restart(old, SimpleNamespace(args=["now"])))  # one the last process handled
+    assert len(stopped) == 1
+    asyncio.run(bot._announce_restart())
+    assert bot.posted[-1].startswith("✅ Back") and not (tmp_path / "restarted").exists()
