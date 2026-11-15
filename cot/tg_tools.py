@@ -18,6 +18,9 @@ LIST_AGENTS = f"mcp__{SERVER}__list_agents"
 SEND_TO_AGENTS = f"mcp__{SERVER}__send_to_agents"
 SET_ALARM = f"mcp__{SERVER}__set_alarm"
 ALARM_MAX_MINUTES = 24 * 60
+# A recurring alarm: how often it may ring, at most and at least, and how many times.
+ALARM_EVERY_MIN, ALARM_EVERY_MAX = 15, 7 * 24 * 60
+ALARM_TIMES_MAX = 100
 MAX_UPLOAD = 50 * 1024 * 1024  # Bot API limit for files sent by bots
 
 SEND_FILE_SCHEMA = {
@@ -61,12 +64,25 @@ SET_ALARM_SCHEMA = {
             "description": "What to do when it rings (e.g. 'check the test run in job.log'); shown to the user "
             "and given back to you then.",
         },
+        "every_minutes": {
+            "type": "integer",
+            "minimum": ALARM_EVERY_MIN,
+            "maximum": ALARM_EVERY_MAX,
+            "description": "Optional: after it first rings, ring again this often (e.g. 1440 for daily), "
+            "until the user cancels it or it has rung `times` times.",
+        },
+        "times": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": ALARM_TIMES_MAX,
+            "description": "Optional, with every_minutes: how many times it rings in all, the first included.",
+        },
     },
     "required": ["minutes", "reason"],
 }
 
-# (minutes, reason) -> what became of it. Raises ValueError if the request makes no sense.
-Alarm = Callable[[int, str], Awaitable[str]]
+# (minutes, reason, every_minutes, times) -> what became of it. Raises ValueError if the request makes no sense.
+Alarm = Callable[[int, str, int | None, int | None], Awaitable[str]]
 
 
 @dataclass
@@ -137,12 +153,22 @@ def make_server(
         "run, a build, a deploy). This returns at once: the alarm is set only if the user approves it with "
         "a button. Once it's approved the bot ends your process, so anything you run that isn't detached "
         "(setsid nohup) stops: start the job detached first, then ask, then end your turn. When it rings "
-        "you get a message with the reason.",
+        "you get a message with the reason. With every_minutes it rings again and again (a daily check, a "
+        "watch every few hours) until the user cancels it or it has rung `times` times; the user's messages "
+        "reach you between rings as usual, they don't wait for it.",
         SET_ALARM_SCHEMA,
     )
     async def set_alarm(args: dict[str, Any]) -> dict[str, Any]:
         try:
-            return _result(await alarm(int(args["minutes"]), str(args["reason"])))
+            every, times = args.get("every_minutes"), args.get("times")
+            return _result(
+                await alarm(
+                    int(args["minutes"]),
+                    str(args["reason"]),
+                    int(every) if every else None,
+                    int(times) if times else None,
+                )
+            )
         except (ValueError, TypeError) as e:
             return _result(str(e), error=True)
 

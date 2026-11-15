@@ -247,6 +247,7 @@ turns it off.
 | `/new`     | Start a fresh conversation                           |
 | `/sleep`   | Done for now: no cache warnings, keep-alives, alarms |
 | `/wake`    | Ring the next alarm now, with the messages waiting for it |
+| `/alarms`  | The alarms asked for or set here, to cancel them     |
 | `/list`    | Recent conversations in this folder, to resume       |
 | `/older`   | Older conversations in this folder (up to 30)        |
 | `/resume`  | `/resume <number or id>`: go back to one of them     |
@@ -336,6 +337,13 @@ shows `⏰ Alarm` and Claude gets a message with its reason, past the wake warni
 (you already approved waking it) but not past a plan limit. Alarms survive
 restarts; a topic moved to another folder since isn't woken. At most 3 per
 conversation, asked for or set.
+
+An alarm can also recur: after its first ring, again every so often (15 min to 7 days,
+e.g. a daily check), until cancelled or for a number of times you see on the request.
+Each ring shows how many so far, when the next one is and a 🔕 Cancel button; rings
+missed while the bot was down don't all come at once. Between rings the conversation
+is as usual: your messages reach Claude, they don't wait for it.
+`/alarms` lists the alarms of a conversation, asked for or set, each with a button to cancel it.
 
 ## Parallel conversations
 

@@ -319,3 +319,47 @@ def test_awake_its_messages_go_straight_on(bot):
     sess = SimpleNamespace(connected=True, pending=[], state=bot.store.get(ME))
     bot.sessions = {ME: sess}
     assert not bot._alarm_asleep(ME)
+
+
+def test_a_recurring_alarm_rings_again_until_its_last_time(bot, monkeypatch):
+    asyncio.run(bot._ask_wakeup(ME, 30, "daily check", 60, 3))
+    assert "then every 1 h, 3 times" in bot.posted[0]
+    press(bot, button(bot.asked[0]))
+    start = time.time()
+    for n in (1, 2):
+        monkeypatch.setattr(time, "time", lambda n=n: start + 30 * 60 + (n - 1) * 3600 + 1)
+        ring(bot)
+        assert "rang, %d time(s) so far" % n in bot.submitted[-1][1]
+        [wake] = bot.store.get(ME).wakeups  # it stays, for the next one
+        assert wake["rung"] == n and "next at" in bot.posted[-1] and "cancel" in button(bot.asked[-1])
+    monkeypatch.setattr(time, "time", lambda: start + 30 * 60 + 2 * 3600 + 1)
+    ring(bot)
+    assert "3 time(s) so far, the last" in bot.submitted[-1][1] and not bot.store.get(ME).wakeups
+
+
+def test_a_recurring_alarm_skips_the_rings_it_missed_and_doesnt_hold_messages(bot, monkeypatch):
+    asyncio.run(bot._ask_wakeup(ME, 30, "watch", 60))
+    press(bot, button(bot.asked[0]))
+    assert not bot._alarm_asleep(ME)  # the user's messages don't wait for it
+    start = time.time()
+    monkeypatch.setattr(time, "time", lambda: start + 5 * 3600)
+    ring(bot)
+    [wake] = bot.store.get(ME).wakeups
+    assert len(bot.submitted) == 1 and start + 5 * 3600 < wake["at"] <= start + 6 * 3600
+
+
+@pytest.mark.parametrize("every,times", [(5, None), (60, 1), (None, 3), (8 * 24 * 60, None)])
+def test_bad_recurrences_are_refused(bot, every, times):
+    with pytest.raises(ValueError):
+        asyncio.run(bot._ask_wakeup(ME, 30, "x", every, times))
+
+
+def test_alarms_lists_them_with_cancel_buttons(bot):
+    asyncio.run(bot._cmd_alarms(None, None))
+    assert bot.posted[-1] == "No alarms here."
+    ask(bot)
+    asyncio.run(bot._ask_wakeup(ME, 30, "watch", 60))
+    press(bot, button(bot.asked[1]))
+    asyncio.run(bot._cmd_alarms(None, None))
+    assert "every 1 h (rung 0)" in bot.posted[-1] and "waiting for your OK" in bot.posted[-1]
+    assert len(bot.asked[-1].inline_keyboard) == 2

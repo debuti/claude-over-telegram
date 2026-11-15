@@ -65,6 +65,7 @@ COMMANDS = [
     ("new", "start a fresh conversation"),
     ("sleep", "let this conversation sleep: no cache warnings or keep-alives"),
     ("wake", "ring its alarm now, with the messages waiting for it"),
+    ("alarms", "the alarms Claude asked for here, to cancel them"),
     ("list", "recent conversations in this folder"),
     ("older", "older conversations in this folder"),
     ("resume", "go back to a past conversation"),
@@ -106,6 +107,11 @@ WAKEUP_MESSAGE = "[From the Telegram bot: the alarm you asked for {when} ago ran
 # The same alarm, rung early by the user with /wake.
 WAKEUP_FORCED = (
     "[From the Telegram bot: the user woke you {when} after you asked for an alarm, before it rang. "
+    "You set it to: {reason}]"
+)
+# A recurring alarm ringing: the n-th time, and whether more will come.
+WAKEUP_RECURRING = (
+    "[From the Telegram bot: your recurring alarm (every {every}) rang, {n} time(s) so far{more}. "
     "You set it to: {reason}]"
 )
 # Keep-alives for an alarm keep the cache this long past it: the alarm loop looks every 15 s.
@@ -199,7 +205,17 @@ def _span(minutes: int) -> str:
 
 
 def _clock(at: float) -> str:
-    return time.strftime("%H:%M", time.localtime(at))
+    """The time, and the day too unless it's today."""
+    day = time.strftime("%a %d ", time.localtime(at)) if time.localtime(at)[:3] != time.localtime()[:3] else ""
+    return day + time.strftime("%H:%M", time.localtime(at))
+
+
+def _repeats(item: dict) -> str:
+    """How a recurring alarm repeats ("every 1 h, 3 times"), or "" for one that rings once."""
+    if not item.get("every"):
+        return ""
+    times = item.get("times")
+    return f"every {_span(item['every'])}" + (f", {times} times" if times else "")
 
 
 def _inside(path: str, root: Path) -> bool:
@@ -281,6 +297,7 @@ class Bot:
         self.app.add_handler(CommandHandler("new", self._cmd_new, filters=allowed))
         self.app.add_handler(CommandHandler("sleep", self._cmd_sleep, filters=allowed))
         self.app.add_handler(CommandHandler("wake", self._cmd_wake, filters=allowed))
+        self.app.add_handler(CommandHandler("alarms", self._cmd_alarms, filters=allowed))
         self.app.add_handler(CommandHandler(["list", "older", "resume"], self._cmd_resume, filters=allowed))
         self.app.add_handler(CommandHandler("menu", self._cmd_menu, filters=allowed))
         self.app.add_handler(CommandHandler("tools", self._cmd_tools, filters=allowed))
@@ -415,7 +432,7 @@ class Bot:
             overview=lambda: self._list_agents(key),
             send=lambda to, text: self._send_to_agents(key, to, text),
         )
-        sess.alarm = lambda minutes, reason: self._ask_wakeup(key, minutes, reason)
+        sess.alarm = lambda minutes, reason, every, times: self._ask_wakeup(key, minutes, reason, every, times)
         sess.start()
         self.sessions[key] = sess
         if state.pending:
@@ -484,7 +501,7 @@ class Bot:
             state.for_alarm.append({"text": text, "ids": ids or []})
             self.store.put(key, state)
             if len(state.for_alarm) == 1:
-                rings = min(w["at"] for w in state.wakeups if w.get("at"))
+                rings = min(w["at"] for w in state.wakeups if w.get("at") and not w.get("every"))
                 await self._output(key).notice(
                     f"⏰ Claude sleeps until its alarm ({_clock(rings)}): your message waits for it. "
                     "/wake to ring it now."
@@ -627,11 +644,19 @@ class Bot:
             return "queued: its agent sleeps until an alarm and gets it when that rings"
         return "delivered"
 
-    async def _ask_wakeup(self, key: Key, minutes: int, reason: str) -> str:
+    async def _ask_wakeup(
+        self, key: Key, minutes: int, reason: str, every: int | None = None, times: int | None = None
+    ) -> str:
         """Puts the alarm before the user; it's set only once they approve it."""
         reason = reason.strip()
         if not 1 <= minutes <= tg_tools.ALARM_MAX_MINUTES:
             raise ValueError(f"minutes must be between 1 and {tg_tools.ALARM_MAX_MINUTES}.")
+        if every is not None and not tg_tools.ALARM_EVERY_MIN <= every <= tg_tools.ALARM_EVERY_MAX:
+            raise ValueError(
+                f"every_minutes must be between {tg_tools.ALARM_EVERY_MIN} and {tg_tools.ALARM_EVERY_MAX}."
+            )
+        if times is not None and (every is None or not 2 <= times <= tg_tools.ALARM_TIMES_MAX):
+            raise ValueError(f"times goes with every_minutes, between 2 and {tg_tools.ALARM_TIMES_MAX}.")
         if not reason or len(esc(reason)) > AGENT_TEXT_LIMIT:
             raise ValueError(f"The reason must have some text and fit in {AGENT_TEXT_LIMIT} characters.")
         state = self._state(key)
@@ -640,9 +665,11 @@ class Bot:
         out = self._output(key)
         await out.flush()
         now = time.time()
+        repeats = _repeats({"every": every, "times": times})
         html = (
-            f"⏰ <b>Claude asks to be woken up in {_span(minutes)}</b> (at {_clock(now + minutes * 60)})\n"
-            f"<pre>{esc(reason)}</pre>"
+            f"⏰ <b>Claude asks to be woken up in {_span(minutes)}</b> (at {_clock(now + minutes * 60)})"
+            + (f"\n🔁 <b>then {repeats}</b>" if repeats else "")
+            + f"\n<pre>{esc(reason)}</pre>"
         )
         wake_id = secrets.token_hex(6)
         keyboard = InlineKeyboardMarkup(
@@ -665,6 +692,7 @@ class Bot:
                 "asked_at": now,
                 "at": 0.0,
                 "html": html,
+                **({"every": every, "times": times, "rung": 0} if every else {}),
             }
         )
         self.store.put(key, state)
@@ -733,17 +761,41 @@ class Bot:
         due = [i for i in state.wakeups if i["at"] and i["at"] <= now]
         if not due:
             return
-        state.wakeups = [i for i in state.wakeups if i not in due]
+
+        def moved(item: dict) -> bool:
+            return item.get("cwd") != state.cwd or not self._assigned(key)
+
+        # A recurring one stays, for its next ring, unless that was its last.
+        again = [i for i in due if i.get("every") and not moved(i) and i["rung"] + 1 != i.get("times")]
+        state.wakeups = [i for i in state.wakeups if i not in due or i in again]
+        for item in again:
+            item["rung"] += 1
+            step = item["every"] * 60
+            item["at"] = item["at"] + step if not item.pop("forced", None) else now + step
+            while item["at"] <= now:  # the bot was down for some rings: they don't all come at once
+                item["at"] += step
         self.store.put(key, state)
         for item in due:
             out = self._output(key)
-            if item.get("cwd") != state.cwd or not self._assigned(key):
+            if moved(item):
                 await out.notice(f"🔕 An alarm for {Path(item.get('cwd', '')).name} didn't ring: the topic moved on")
                 continue
             forced = item.get("forced")
-            msg_id = await out.send_html(f"⏰ <b>{'Woken up' if forced else 'Alarm'}</b>\n{esc(item['reason'])}")
-            when = _span(max(1, round((now - item["asked_at"]) / 60)))
-            text = (WAKEUP_FORCED if forced else WAKEUP_MESSAGE).format(when=when, reason=item["reason"])
+            markup = None
+            if item.get("every"):
+                rung = item["rung"] + (item not in again)
+                more = f", next at {_clock(item['at'])}" if item in again else ", the last one"
+                title = f"⏰ <b>Alarm</b> ({_repeats(item)}: {rung}{more})"
+                last = "" if item in again else ", the last"
+                text = WAKEUP_RECURRING.format(every=_span(item["every"]), n=rung, more=last, reason=item["reason"])
+                if item in again:
+                    cancel = InlineKeyboardButton("🔕 Cancel", callback_data=f"wakeup:{item['id']}:cancel")
+                    markup = InlineKeyboardMarkup([[cancel]])
+            else:
+                title = f"⏰ <b>{'Woken up' if forced else 'Alarm'}</b>"
+                when = _span(max(1, round((now - item["asked_at"]) / 60)))
+                text = (WAKEUP_FORCED if forced else WAKEUP_MESSAGE).format(when=when, reason=item["reason"])
+            msg_id = await out.send_html(f"{title}\n{esc(item['reason'])}", reply_markup=markup)
             # The user approved waking it: no wake warning, but plan limits still hold it.
             await self._submit(key, text, [msg_id] if msg_id else None, hold=False)
             await self._flush_for_alarm(key, force=True)
@@ -755,7 +807,8 @@ class Bot:
         sess = self.sessions.get(key)
         if sess and (sess.connected or sess.pending):
             return False
-        return any(w.get("at") for w in state.wakeups)
+        # Not a recurring one: the user's messages don't wait days for it.
+        return any(w.get("at") and not w.get("every") for w in state.wakeups)
 
     async def _flush_for_alarm(self, key: Key, force: bool = False) -> None:
         """Hand Claude the messages that waited for its alarm, once it rang (force) or none is left."""
@@ -1680,6 +1733,21 @@ class Bot:
             f"💤 Asleep: no more cache warnings or keep-alives here, its cache may go.{alarms} "
             "Your next message wakes it up."
         )
+
+    async def _cmd_alarms(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/alarms: the alarms asked for or set here, each with a button to cancel it."""
+        key = self._key(update)
+        state = self._state(key)
+        if not state.wakeups:
+            await self._output(key).notice("No alarms here.")
+            return
+        lines, rows = ["⏰ <b>Alarms</b>"], []
+        for n, item in enumerate(sorted(state.wakeups, key=lambda w: w["at"] or float("inf")), 1):
+            when = f"rings at {_clock(item['at'])}" if item["at"] else "waiting for your OK"
+            repeats = f", {_repeats(item)} (rung {item['rung']})" if item.get("every") else ""
+            lines.append(f"{n}. {when}{repeats}\n<i>{esc(item['reason'][:300])}</i>")
+            rows.append([InlineKeyboardButton(f"🔕 Cancel {n}", callback_data=f"wakeup:{item['id']}:cancel")])
+        await self._output(key).send_html("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
 
     async def _cmd_wake(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """/wake: ring the next alarm now, and with it the messages that waited for it."""
