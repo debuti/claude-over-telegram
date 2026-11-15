@@ -891,3 +891,33 @@ async def test_advanced_menu_pages(bot):
     assert "Advanced" in query.edited[-1] and bot.store.get(KEY).advanced["effort"] == "max"
     text, markup = bot._menu(KEY)
     assert any(b.callback_data == "menu:advanced" for row in markup.inline_keyboard for b in row)
+
+
+def _with_model(bot, model):
+    state = bot.store.get(KEY)
+    state.model = model
+    bot.store.put(KEY, state)
+
+    async def set_model(m):
+        s = bot.store.get(KEY)
+        s.model = m
+        bot.store.put(KEY, s)
+    bot.sess.state, bot.sess.set_model, bot.sess.out = state, set_model, bot.out
+
+
+async def test_other_model_goes_on_past_the_old_ones_limit(limit):
+    """Fable's own weekly limit stopped it; the plan isn't stopped, so Opus takes what waited."""
+    _with_model(limit, "claude-fable-5-2")
+    await limit._on_limited(KEY, [{"text": "one", "ids": []}], 9e9, cut=True)
+    limit.limit = False
+    await limit._set_model(KEY, "claude-opus-5-5")
+    state = limit.store.get(KEY)
+    assert limit.delivered == [CONTINUE_PROMPT, "one"]
+    assert state.limit_until == 0 and not state.limit_cut and state.held == []
+
+
+async def test_other_model_still_waits_for_a_plan_wide_limit(limit):
+    _with_model(limit, "claude-fable-5-2")
+    await limit._on_limited(KEY, [{"text": "one", "ids": []}], 9e9)
+    await limit._set_model(KEY, "claude-opus-5-5")
+    assert limit.delivered == [] and limit.store.get(KEY).limit_until == 9e9

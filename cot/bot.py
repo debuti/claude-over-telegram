@@ -2032,11 +2032,13 @@ class Bot:
             return
         sess = self._session(key)
         if ctx.args:
-            await self._set_model(sess, ctx.args[0])
+            await self._set_model(key, ctx.args[0])
             return
         await self._send_picker(key, "model")
 
-    async def _set_model(self, sess: Session, model: str) -> None:
+    async def _set_model(self, key: Key, model: str) -> None:
+        sess = self._session(key)
+        before = sess.state.model
         try:
             await sess.set_model(None if model == "default" else model)
         except Exception as e:
@@ -2044,6 +2046,23 @@ class Bot:
             await sess.out.notice(f"⚠️ Could not change model: {e}")
             return
         await sess.out.notice(f"🧠 Model: {model} (applies from the next message)")
+        await self._limit_for_model(key, before)
+
+    async def _limit_for_model(self, key: Key, before: str | None) -> None:
+        """A limit this conversation hit may be the old model's own (Fable's weekly one): with
+        another model, and no plan-wide limit or reserve stopping Claude, what waited goes now.
+        If the new model is limited too, the next turn says so again."""
+        state = self._state(key)
+        if not state.limit_until or state.model == before or await self._blocked():
+            return
+        state.limit_until = 0.0
+        if state.limit_cut:
+            state.limit_cut = False
+            state.held.insert(0, {"text": CONTINUE_PROMPT, "ids": []})
+        self.store.put(key, state)
+        if state.held:
+            await self._output(key).notice("▶️ The limit was the previous model's: going on with this one")
+        await self._release(key)
 
     async def _cmd_catchup(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """/catchup [auto|compact|ask]: whether the conversation goes on by itself when a plan limit lifts."""
@@ -2084,7 +2103,10 @@ class Bot:
         if what == "catchup":
             await self._set_catchup(key, value)
         else:
-            setter = {"tools": self._set_tools, "mode": self._set_mode, "model": self._set_model}[what]
+            if what == "model":
+                await self._set_model(key, value)
+                return
+            setter = {"tools": self._set_tools, "mode": self._set_mode}[what]
             await setter(self._session(key), value)
 
     def _menu(self, key: Key) -> tuple[str, InlineKeyboardMarkup]:
