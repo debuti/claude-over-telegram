@@ -859,3 +859,35 @@ async def test_sleep_lets_the_cache_go_until_the_next_message(bot, monkeypatch):
     assert not state.asleep
     await bot._check_alarm(KEY, state)
     assert bot.alarms[KEY]["step"] == 5
+
+
+async def test_advanced_settings_are_kept_and_restart_claude(bot):
+    restarts, state = [], bot.store.get(KEY)
+    bot.sessions[KEY] = SimpleNamespace(state=state, restart_later=lambda: restarts.append(1))
+    await bot._set_advanced(KEY, "effort", "low")
+    await bot._set_advanced(KEY, "budget", "2.5")
+    await bot._set_advanced(KEY, "block", "bash")
+    await bot._set_advanced(KEY, "block", "WebSearch")
+    assert state.advanced == {"effort": "low", "budget": "2.5", "block": "WebSearch,Bash"}
+    await bot._set_advanced(KEY, "block", "Bash")  # a toggle
+    await bot._set_advanced(KEY, "effort", "default")
+    await bot._set_advanced(KEY, "thinking", "off")
+    assert state.advanced == {"budget": "2.5", "block": "WebSearch", "thinking": "off"}
+    assert len(restarts) == 7
+    await bot._set_advanced(KEY, "turns", "lots")
+    await bot._set_advanced(KEY, "effort", "huge")
+    await bot._set_advanced(KEY, "nope", "1")
+    assert len(restarts) == 7 and "turns" not in state.advanced and "effort" not in state.advanced
+
+
+async def test_advanced_menu_pages(bot):
+    bot.cfg.permission_mode = "auto"
+    query = Query("menu:advanced", None)
+    await bot._on_menu(None, None, KEY, query, "advanced")
+    assert "Advanced" in query.edited[-1]
+    await bot._on_menu(None, None, KEY, query, "adv.block=Bash")  # a toggle stays on its page
+    assert query.edited[-1].startswith("🚫 Blocked tools: <b>Bash</b>")
+    await bot._on_menu(None, None, KEY, query, "adv.effort=max")  # a choice goes back to the settings
+    assert "Advanced" in query.edited[-1] and bot.store.get(KEY).advanced["effort"] == "max"
+    text, markup = bot._menu(KEY)
+    assert any(b.callback_data == "menu:advanced" for row in markup.inline_keyboard for b in row)

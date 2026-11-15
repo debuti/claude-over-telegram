@@ -217,18 +217,40 @@ class Session:
         self._handed_back = False  # a limit during this turn's compaction took its messages too
         self._worked = False  # the running turn got some answer from Claude
         self._running_as: str | None = None  # the container's name, if the topic is renamed after it starts
+        self._reconnect = False  # /advanced changed: a new Claude process before the next turn
 
     def _set_waiting(self, value: bool) -> None:
         self.waiting = value
 
+    def restart_later(self) -> None:
+        """Options that only a new Claude process takes: it starts again (resuming) before the next turn."""
+        self._reconnect = True
+
+    def _advanced(self) -> dict:
+        """/advanced's settings as ClaudeAgentOptions' arguments."""
+        a = self.state.advanced
+        thinking = {"adaptive": {"type": "adaptive"}, "off": {"type": "disabled"}}.get(a.get("thinking", ""))
+        fallback = a.get("fallback") or None
+        return {
+            "effort": a.get("effort") or None,
+            "thinking": thinking,
+            # The CLI refuses a fallback that is the main model.
+            "fallback_model": fallback if fallback != self.state.model else None,
+            "max_turns": int(a["turns"]) if a.get("turns") else None,
+            "max_budget_usd": float(a["budget"]) if a.get("budget") else None,
+        }
+
     def _options(self) -> ClaudeAgentOptions:
         self._running_as = self._container_name()
+        self._reconnect = False
+        blocked = [t for t in self.state.advanced.get("block", "").split(",") if t]
         return ClaudeAgentOptions(
             cwd=self.state.cwd,
             resume=self.state.session_id,
             permission_mode=self.state.mode or self._default_mode,
             model=self.state.model,
-            disallowed_tools=["AskUserQuestion"],
+            disallowed_tools=["AskUserQuestion", *blocked],
+            **self._advanced(),
             # The SDK's 1 MB default per message is too small for image/PDF reads (base64).
             max_buffer_size=64 * 1024 * 1024,
             mcp_servers={
@@ -478,6 +500,8 @@ class Session:
             try:
                 if self._client is not None and not self._alive():
                     log.warning("Claude exited between turns; reconnecting")
+                    await self._disconnect()
+                elif self._client is not None and self._reconnect:  # /advanced: options of a new process
                     await self._disconnect()
                 if self._client is None:
                     await self._connect()

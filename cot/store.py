@@ -60,6 +60,9 @@ class ConvState:
     # Messages sent while Claude sleeps until an approved alarm ({"text", "ids"}): they go with it
     # when it rings, or with /wake.
     for_alarm: list[dict] = field(default_factory=list)
+    # /advanced: Claude's options beyond model and mode ("effort", "thinking", "fallback", "turns", "budget",
+    # "block"), as their picker's values; a missing one is Claude Code's default.
+    advanced: dict[str, str] = field(default_factory=dict)
 
 
 def _migrate(v: dict) -> dict:

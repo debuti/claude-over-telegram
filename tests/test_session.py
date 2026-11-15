@@ -533,3 +533,24 @@ def test_claude_is_told_about_its_container_only_when_in_one():
     prompt = sess._append_prompt()
     assert prompt.startswith(plain) and "2 CPUs and 4 GB" in prompt and "no docker" in prompt
     assert "{" not in prompt
+
+
+REAL_OPTIONS = Session._options  # before fake_cli stubs it
+
+
+def test_advanced_settings_reach_claude():
+    state = ConvState(cwd="/tmp", session_id="s", model="claude-opus-5-5", advanced={
+        "effort": "high", "thinking": "off", "fallback": "claude-opus-5-5", "turns": "25", "budget": "2",
+        "block": "WebSearch,Bash",
+    })
+    sess = Session(state, out=FakeOutput(), on_state=lambda st: None, default_mode="auto", cli_path=None,
+                   cli_env={}, sandbox_bash=False)
+    sess.restart_later()
+    opts = REAL_OPTIONS(sess)
+    assert not sess._reconnect
+    assert (opts.effort, opts.thinking, opts.max_turns, opts.max_budget_usd) == ("high", {"type": "disabled"}, 25, 2.0)
+    assert opts.fallback_model is None  # the CLI refuses the main model as fallback
+    assert opts.disallowed_tools == ["AskUserQuestion", "WebSearch", "Bash"]
+    state.advanced = {}
+    opts = REAL_OPTIONS(sess)
+    assert (opts.effort, opts.thinking, opts.max_turns, opts.max_budget_usd) == (None, None, None, None)

@@ -74,6 +74,7 @@ COMMANDS = [
     ("mode", "permission mode"),
     ("model", "switch model"),
     ("catchup", "go on by itself when a plan limit lifts"),
+    ("advanced", "effort, thinking, fallback model, limits, blocked tools"),
     ("status", "what's going on"),
     ("tldr", "what this project is and what each part does"),
     ("cost", "estimated cost of this conversation"),
@@ -169,6 +170,26 @@ MODELS = {
     "claude-opus-5-5": "Opus 5.5",
     "claude-sonnet-5-5": "Sonnet 5.5",
     "claude-haiku-5-5": "Haiku 5.5",
+}
+
+# /advanced: each setting's icon, name and choices (value, label); "-" is Claude Code's default.
+# "block" toggles each tool in or out of the list.
+ADVANCED = {
+    "effort": (
+        "🎚",
+        "Effort",
+        [("-", "Default"), ("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Extra high"),
+         ("max", "Max")],
+    ),
+    "thinking": ("💭", "Thinking", [("-", "Default"), ("adaptive", "Adaptive"), ("off", "Off")]),
+    "fallback": ("🪂", "Fallback model", [("-", "None"), *MODELS.items()]),
+    "turns": ("🔁", "Max turns per message", [("-", "No limit"), *((n, n) for n in ("10", "25", "50", "100"))]),
+    "budget": (
+        "💵",
+        "Budget per Claude process",
+        [("-", "No limit"), *((v, f"${v}") for v in ("0.5", "1", "2", "5", "10"))],
+    ),
+    "block": ("🚫", "Blocked tools", [("-", "None"), *((t, t) for t in ("WebSearch", "WebFetch", "Bash", "Agent"))]),
 }
 
 
@@ -267,6 +288,7 @@ class Bot:
         self.app.add_handler(CommandHandler("stop", self._cmd_stop, filters=allowed))
         self.app.add_handler(CommandHandler("model", self._cmd_model, filters=allowed))
         self.app.add_handler(CommandHandler("catchup", self._cmd_catchup, filters=allowed))
+        self.app.add_handler(CommandHandler("advanced", self._cmd_advanced, filters=allowed))
         self.app.add_handler(CommandHandler("status", self._cmd_status, filters=allowed))
         self.app.add_handler(CommandHandler("cost", self._cmd_cost, filters=allowed))
         self.app.add_handler(CommandHandler("tldr", self._cmd_tldr, filters=allowed))
@@ -1559,7 +1581,9 @@ class Bot:
         if sess:
             await sess.close()
         # A new directory means a new conversation; display preferences carry over.
-        state = ConvState(cwd=str(path), mode=old.mode, model=old.model, tools=old.tools, title=old.title)
+        state = ConvState(
+            cwd=str(path), mode=old.mode, model=old.model, tools=old.tools, title=old.title, advanced=dict(old.advanced)
+        )
         # The new conversation gets them.
         state.held, state.limit_until, state.limit_auto = old.held, old.limit_until, old.limit_auto
         state.login_lost_at, state.agent_sends = old.login_lost_at, old.agent_sends
@@ -1867,7 +1891,8 @@ class Bot:
             heading, _ = self._picker(key, what)
             value = re.sub(r"<[^>]+>", "", heading.partition(": ")[2])
             settings.append(InlineKeyboardButton(f"{icon} {value}", callback_data=f"menu:{what}"))
-        rows = [settings[:2], settings[2:]] + [
+        settings.append(InlineKeyboardButton("🔧 Advanced", callback_data="menu:advanced"))
+        rows = [settings[:2], settings[2:4], settings[4:]] + [
             [InlineKeyboardButton(label, callback_data=f"menu:{cmd}") for label, cmd in row] for row in MENU_ACTIONS
         ]
         return f"⚙️ {esc(self._where(key))}", InlineKeyboardMarkup(rows)
@@ -1883,6 +1908,22 @@ class Bot:
         page, _, value = rest.partition("=")
         if page == "close":
             await query.edit_message_reply_markup(None)
+            return
+        if page == "advanced" or page.startswith("adv."):
+            if not await self._ready(key):
+                return
+            name = page.removeprefix("adv.")
+            if value:
+                await self._set_advanced(key, name, value)
+            # A choice goes back to the settings, but tools are toggled on their own page.
+            if page == "advanced" or (value and name != "block"):
+                text, markup = self._advanced_page(key)
+            else:
+                text, markup = self._advanced_picker(key, name)
+            try:
+                await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            except BadRequest as e:
+                log.debug("menu not edited: %s", e)
             return
         if page in ("model", "tools", "mode", "catchup"):
             if not await self._ready(key):
@@ -1903,6 +1944,86 @@ class Bot:
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
         except BadRequest as e:  # unchanged: Telegram refuses an edit to the same thing
             log.debug("menu not edited: %s", e)
+
+    def _advanced_shown(self, key: Key, name: str) -> str:
+        """What an /advanced setting is now, as its picker labels it."""
+        value = self._state(key).advanced.get(name, "")
+        labels = dict(ADVANCED[name][2])
+        if name == "block":
+            return ", ".join(t for t in value.split(",") if t) or labels["-"]
+        return labels.get(value or "-", value)
+
+    def _advanced_page(self, key: Key) -> tuple[str, InlineKeyboardMarkup]:
+        """/advanced: each setting with its value, opening its choices."""
+        rows = [
+            [InlineKeyboardButton(f"{icon} {title}: {self._advanced_shown(key, n)}", callback_data=f"menu:adv.{n}")]
+            for n, (icon, title, _) in ADVANCED.items()
+        ]
+        rows.append([InlineKeyboardButton("‹ Back", callback_data="menu:main")])
+        text = "🔧 <b>Advanced</b>\nChanges start Claude again (resuming) before the next message."
+        return text, InlineKeyboardMarkup(rows)
+
+    def _advanced_picker(self, key: Key, name: str) -> tuple[str, InlineKeyboardMarkup]:
+        icon, title, options = ADVANCED[name]
+        current = self._state(key).advanced.get(name, "")
+        if name == "block":
+            on = set(current.split(","))
+            marks = {v: ("✅ " if v in on else "▫️ ") if v != "-" else "" for v, _ in options}
+        else:
+            marks = {v: "● " if v == (current or "-") else "" for v, _ in options}
+        rows = [[InlineKeyboardButton(marks[v] + label, callback_data=f"menu:adv.{name}={v}")] for v, label in options]
+        rows.append([InlineKeyboardButton("‹ Back", callback_data="menu:advanced")])
+        return f"{icon} {title}: <b>{esc(self._advanced_shown(key, name))}</b>", InlineKeyboardMarkup(rows)
+
+    async def _cmd_advanced(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/advanced [setting value]: effort, thinking, fallback model, limits and blocked tools."""
+        key = self._key(update)
+        if not await self._ready(key):
+            return
+        if len(ctx.args or []) == 2:
+            await self._set_advanced(key, ctx.args[0].lower(), ctx.args[1])
+            return
+        text, markup = self._advanced_page(key)
+        await self._output(key).send_html(text, reply_markup=markup)
+
+    async def _set_advanced(self, key: Key, name: str, value: str) -> None:
+        out = self._output(key)
+        if name not in ADVANCED:
+            await out.notice(f"Unknown setting {name}. Options: {', '.join(ADVANCED)}")
+            return
+        icon, title, options = ADVANCED[name]
+        values = [v for v, _ in options]
+        if value.lower() in ("default", "none", "off", "no") and not (name == "thinking" and value == "off"):
+            value = "-"
+        state = self._state(key)
+        current = state.advanced.get(name, "")
+        if name == "block" and value != "-":
+            tool = next((t for t in values if t.lower() == value.lower()), None)
+            if tool is None:
+                await out.notice(f"Unknown tool {value}. Options: {', '.join(values[1:])}")
+                return
+            on = [t for t in current.split(",") if t]
+            on = [t for t in on if t != tool] if tool in on else [*on, tool]
+            value = ",".join(t for t in values if t in on) or "-"
+        elif name in ("turns", "budget") and value != "-":
+            try:
+                ok = (int(value) if name == "turns" else float(value)) > 0
+            except ValueError:
+                ok = False
+            if not ok:
+                await out.notice(f"{title}: a number above 0, or none")
+                return
+        elif value not in values:
+            await out.notice(f"Unknown choice {value}. Options: {', '.join(values)}")
+            return
+        if value == "-":
+            state.advanced.pop(name, None)
+        else:
+            state.advanced[name] = value
+        self.store.put(key, state)
+        if sess := self.sessions.get(key):
+            sess.restart_later()
+        await out.notice(f"{icon} {title}: {self._advanced_shown(key, name)} (applies from the next message)")
 
     async def _set_catchup(self, key: Key, arg: str) -> None:
         value = {**CATCHUP_ARGS, "on": "send", "off": "", "no": ""}.get(arg)
@@ -1944,6 +2065,7 @@ class Bot:
             f"tools: {state.tools}",
             f"after a plan limit: {CATCHUP[state.catchup]}",
         ]
+        lines += [f"{ADVANCED[n][1].lower()}: {self._advanced_shown(key, n)}" for n in ADVANCED if n in state.advanced]
         try:
             context = await sess.context_usage() if sess else None
         except Exception:

@@ -1,6 +1,6 @@
 claude-over-telegram: a Telegram bot to talk to Claude Code from the phone. Each topic is one conversation about one project folder, each in its own Docker container.
 
-- cot/bot.py: the bot itself: commands (/menu, /model, /catchup, /tldr…), buttons, and messages that wait for plan limits, the login or your OK
+- cot/bot.py: the bot itself: commands (/menu, /model, /catchup, /advanced, /tldr…), buttons, and messages that wait for plan limits, the login or your OK
 - cot/session.py: one Claude Code session per topic, and what it streams back
 - cot/output.py, render.py: turn Claude's replies and tool activity into Telegram messages
 - cot/costguard.py, usage.py, triage.py: cache cost warnings, plan usage and its reserve, and a small model that picks where a message to a cold conversation goes

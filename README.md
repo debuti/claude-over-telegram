@@ -255,6 +255,7 @@ turns it off.
 | `/mode`    | Permission mode (default, acceptEdits, plan, auto…)  |
 | `/model`   | Switch model                                         |
 | `/catchup` | Go on by itself when a plan limit lifts: `auto`, `compact` or `ask` (default) |
+| `/advanced` | Effort, thinking, fallback model, limits, blocked tools (also in `/menu`) |
 | `/status`  | Workdir, mode, model, activity, context usage        |
 | `/cost`    | Estimated cost of the conversation                   |
 | `/usage`   | Plan usage: 5-hour and weekly limits                 |
@@ -266,6 +267,19 @@ turns it off.
 `/menu` sends a panel to use with your thumb: the model, tool activity, permission mode
 and what happens after a plan limit, each showing its current value and opening its choices
 in the same message, then buttons for the commands above. Close takes the buttons off.
+
+🔧 Advanced (also `/advanced`, or `/advanced <setting> <value>`) holds what is rarely changed,
+each kept per conversation and unset by default (Claude Code's own choice):
+- `effort`: how hard Claude thinks, `low` to `max`; lower is faster and uses less of the plan.
+- `thinking`: `adaptive` or `off`.
+- `fallback`: the model to use when the main one is overloaded.
+- `turns`: at most this many steps (tool calls) per message, then it stops.
+- `budget`: Claude stops once its process has spent this many dollars (estimated);
+  the process lasts from a message until it goes idle.
+- `block`: tools Claude can't use here (WebSearch, WebFetch, Bash, Agent), each toggled on or off.
+
+A change starts Claude again before the next message, resuming the conversation; changing
+thinking or the blocked tools also means its cache is written anew.
 
 When Claude needs permission (the same cases where the terminal would ask), you
 get the request with ✅ Allow / ❌ Deny / ♾️ Always buttons. "Always" saves the
