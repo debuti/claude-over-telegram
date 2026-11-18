@@ -13,7 +13,7 @@ from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest, RetryAfter, TelegramError
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -29,6 +29,7 @@ from . import (
     costguard,
     history,
     login,
+    outages,
     permissions,
     server,
     tg_tools,
@@ -326,17 +327,22 @@ class Bot:
         self._reserve_skip = 0.0
         self._sleeping: set[asyncio.Task] = set()  # Claude processes being ended for an alarm
         self._titles_pause = 0.0  # no renames before this: Telegram asked to slow down
+        self.outages = outages.Outages(cfg.state_dir / "outages.json")
+        self._outage_task: asyncio.Task | None = None
+        self._outage_tried = 0.0
         self.usage_log = usagelog.UsageLog(cfg.state_dir / "usage.jsonl", cfg.cli_path or container.bundled_cli())
         self.app = (
             Application.builder()
             .token(cfg.telegram_token)
             .concurrent_updates(True)
-            .connect_timeout(20)
             # The 5 s defaults time out when the machine is overloaded.
-            .read_timeout(30)
-            .write_timeout(30)
-            .media_write_timeout(120)
-            .get_updates_connect_timeout(20)
+            .request(
+                outages.WatchedRequest(
+                    self.outages, self._outage_over, connection_pool_size=256,
+                    connect_timeout=20, read_timeout=30, write_timeout=30, media_write_timeout=120,
+                )
+            )
+            .get_updates_request(outages.WatchedRequest(self.outages, self._outage_over, connect_timeout=20))
             .post_init(self._post_init)
             .post_shutdown(self._shutdown)
             .build()
@@ -376,6 +382,35 @@ class Bot:
         media = filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.AUDIO | filters.VOICE
         self.app.add_handler(MessageHandler(allowed & media, self._on_file))
         self.app.add_handler(MessageHandler(~allowed, self._on_stranger))
+        self.app.add_error_handler(self._on_error)
+
+    async def _on_error(self, update: object, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        # Telegram not answering is common and the outage watcher reports it: one line, no traceback.
+        if isinstance(ctx.error, NetworkError):
+            log.warning("Telegram request failed: %s", outages.kind_of(ctx.error))
+        else:
+            log.error("Unhandled error in an update", exc_info=ctx.error)
+
+    def _outage_over(self) -> None:
+        """Telegram answered: tells the user about the outage just over, if there was one to tell."""
+        if self._outage_task or not self.outages.report() or time.time() - self._outage_tried < 60:
+            return
+        self._outage_tried = time.time()
+        self._outage_task = asyncio.create_task(self._report_outage())
+
+    async def _report_outage(self) -> None:
+        try:
+            text = self.outages.report()
+            known = [(key, state) for key, state in self.store.items() if self._assigned(key)]
+            known.sort(key=lambda item: item[1].last_active, reverse=True)
+            for key, _ in known[:VERSION_NOTICE_TRIES]:
+                if await self._output(key).send_html(esc(text)):
+                    self.outages.reported()
+                    break
+        except Exception:
+            log.exception("could not report Telegram's outage")
+        finally:
+            self._outage_task = None
 
     def run(self) -> None:
         # Retry forever: the bot runs unattended and must survive network blips at startup.
