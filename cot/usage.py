@@ -169,10 +169,12 @@ def _pace(percent: float, iso: str | None) -> str:
     pace = "on pace" if abs(off) < 1 else f"{abs(off):.0f}% {'over' if off > 0 else 'under'} pace"
     lasts = (100 - percent) / (percent / elapsed)  # seconds until 100% at the current rate
     diff = left - lasts
+    icon = "🔥" if off > 5 else "🧊" if off < -5 else "👍"
     if abs(diff) < 3600:
-        return f"\n⚖️ {pace}, at the current rate, runs out right at reset"
-    icon, when = ("🔥", "before") if diff > 0 else ("🧊", "after")
-    return f"\n{icon} {pace}, at the current rate, runs out ~{_duration(abs(diff))} {when} reset"
+        return f"\n{icon} {pace}, at the current rate, runs out right at reset"
+    if diff > 0:
+        return f"\n{icon} {pace}, at the current rate, runs out ~{_duration(diff)} BEFORE reset"
+    return f"\n{icon} {pace}, at the current rate, lasts past reset (~{_duration(-diff)} to spare)"
 
 
 def _rate_limited(r: httpx.Response) -> float:
