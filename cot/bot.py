@@ -85,7 +85,7 @@ COMMANDS = [
     ("tldr", "what this project is and what each part does"),
     ("cost", "estimated cost of this conversation"),
     ("usage", "plan usage limits (5-hour and weekly)"),
-    ("usagechart", "plan usage over the last 30 days, as a chart (/usagechart 7 for a week)"),
+    ("usagechart", "weekly limits week by week, as a chart (/usagechart session: the 5-hour one)"),
     ("login", "renew Claude's login from here"),
     ("server", "load of the machine the bot runs on"),
     ("restart", "restart the bot (takes up a git pull)"),
@@ -2457,16 +2457,22 @@ class Bot:
         await self._output(key).notice(text)
 
     async def _cmd_usagechart(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """/usagechart [days]: how the plan usage went up and down, from the readings kept (up to 30 days)."""
+        """/usagechart: the weeks of the plan's weekly limits one over the other, from their reset;
+        /usagechart session [days]: the 5-hour session over the last days (7)."""
         key = self._key(update)
         out = self._output(key)
+        args = [a.lower() for a in ctx.args or []]
+        session = bool(args) and args[0] == "session"
         try:
-            days = min(max(int((ctx.args or ["30"])[0]), 1), usagehist.KEEP_DAYS - 1)
+            days = min(max(int(args[1]), 1), usagehist.KEEP_DAYS - 1) if session and len(args) > 1 else 7
         except ValueError:
-            await out.notice("/usagechart takes a number of days, e.g. /usagechart 7")
+            await out.notice("/usagechart session takes a number of days, e.g. /usagechart session 3")
             return
         try:
-            png = await asyncio.to_thread(usagehist.chart, usage.history, days)
+            if session:
+                png = await asyncio.to_thread(usagehist.session_chart, usage.history, days)
+            else:
+                png = await asyncio.to_thread(usagehist.weekly_chart, usage.history)
         except Exception as e:
             log.exception("usage chart failed")
             await out.notice(f"⚠️ Could not draw the chart: {e}")
@@ -2476,7 +2482,9 @@ class Bot:
             return
         path = self.cfg.state_dir / "usage_chart.png"
         path.write_bytes(png)
-        await out.send_path(path, caption=f"📈 Plan usage, last {days} day{'s' * (days > 1)}")
+        caption = (f"📈 5-hour session, last {days} day{'s' * (days > 1)}" if session
+                   else "📈 Weekly limits, week by week (/usagechart session for the 5-hour one)")
+        await out.send_path(path, caption=caption)
 
     async def _send_usage_later(self, key: Key) -> None:
         """/usage while the endpoint was rate-limited: the reading, once it lets the bot ask."""
