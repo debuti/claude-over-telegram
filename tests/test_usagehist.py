@@ -7,16 +7,16 @@ from cot import usagehist
 DATA = {"limits": [{"kind": "session", "percent": 12.0}, {"kind": "weekly_all", "percent": 40.0}]}
 
 
-def test_kept_at_most_every_few_minutes_and_pruned(tmp_path, monkeypatch):
+def test_kept_at_most_every_few_minutes_and_for_good(tmp_path, monkeypatch):
     monkeypatch.setattr(usagehist, "_last_at", 0.0)
     path = tmp_path / "h.jsonl"
     old = 1_000_000_000
     assert usagehist.record(path, DATA, now=old)
     assert not usagehist.record(path, DATA, now=old + 60)
     now = old + 40 * 86400
-    assert usagehist.record(path, DATA, now=now)  # a new day: drops what is over a month old
+    assert usagehist.record(path, DATA, now=now)  # what is over a month old stays
     rows = [json.loads(x) for x in path.read_text().splitlines()]
-    assert [r["t"] for r in rows] == [now] and rows[0]["l"] == {"5-hour session": 12.0, "Week, all models": 40.0}
+    assert [r["t"] for r in rows] == [old, now] and rows[0]["l"] == {"5-hour session": 12.0, "Week, all models": 40.0}
 
 
 def test_picks_up_after_a_restart(tmp_path, monkeypatch):

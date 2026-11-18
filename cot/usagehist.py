@@ -1,4 +1,5 @@
-"""The plan usage over time: every reading (at most one each few minutes) in state/usage_history.jsonl,
+"""The plan usage over time: every reading (at most one each few minutes) kept for good in
+state/usage_history.jsonl (~70 KB a day), for what may be done with it later;
 and charts of it as PNGs: the weeks one over the other from their reset, and the 5-hour session over the last days."""
 
 import io
@@ -8,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 EVERY = 240.0  # seconds: readings closer than this to the last one kept aren't kept
-KEEP_DAYS = 31
+CHART_DAYS = 31  # what the charts look back over; the file keeps everything
 GAP = 1800.0  # seconds without readings after which the lines break instead of joining the dots
 WEEK = 7 * 86400
 
@@ -24,7 +25,7 @@ _last_at = 0.0
 
 
 def record(path: Path, data: dict, now: float | None = None) -> bool:
-    """Keep this reading, unless one was kept less than EVERY seconds ago. Once a day, drops the old ones."""
+    """Keep this reading, unless one was kept less than EVERY seconds ago."""
     global _last_at
     from .usage import _label, epoch  # here: usage imports this module
 
@@ -45,8 +46,6 @@ def record(path: Path, data: dict, now: float | None = None) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
         f.write(json.dumps({"t": round(now), "l": limits, "r": resets}, ensure_ascii=False) + "\n")
-    if int(now // 86400) != int(_last_at // 86400):
-        _prune(path, now)
     _last_at = now
     return True
 
@@ -76,13 +75,6 @@ def load(path: Path, since: float) -> list[dict]:
         except (ValueError, KeyError, TypeError):
             continue
     return rows
-
-
-def _prune(path: Path, now: float) -> None:
-    rows = load(path, now - KEEP_DAYS * 86400)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
-    tmp.replace(path)
 
 
 def week_start(row: dict, label: str) -> float:
@@ -145,7 +137,7 @@ def weekly_chart(path: Path, now: float | None = None) -> bytes | None:
     """PNG with one panel per weekly limit: x the week from its reset, one line per week, the current one
     intense red and the older ones fading. None without readings."""
     now = time.time() if now is None else now
-    rows = load(path, now - KEEP_DAYS * 86400)
+    rows = load(path, now - CHART_DAYS * 86400)
     labels = sorted({x for row in rows for x in row["l"] if x != SESSION},
                     key=lambda x: (x != "Week, all models", x))
     if not rows or not labels:

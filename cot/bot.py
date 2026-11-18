@@ -2464,7 +2464,7 @@ class Bot:
         args = [a.lower() for a in ctx.args or []]
         session = bool(args) and args[0] == "session"
         try:
-            days = min(max(int(args[1]), 1), usagehist.KEEP_DAYS - 1) if session and len(args) > 1 else 7
+            days = min(max(int(args[1]), 1), usagehist.CHART_DAYS - 1) if session and len(args) > 1 else 7
         except ValueError:
             await out.notice("/usagechart session takes a number of days, e.g. /usagechart session 3")
             return
