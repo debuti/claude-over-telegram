@@ -1,3 +1,4 @@
 claude-agent-sdk==0.2.180
 python-telegram-bot==22.8
 python-dotenv==1.2.4
+matplotlib==3.11.2

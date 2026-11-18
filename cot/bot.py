@@ -38,6 +38,7 @@ from . import (
     triage,
     uploads,
     usage,
+    usagehist,
     usagelog,
 )
 from .config import REPO_DIR, Config
@@ -84,6 +85,7 @@ COMMANDS = [
     ("tldr", "what this project is and what each part does"),
     ("cost", "estimated cost of this conversation"),
     ("usage", "plan usage limits (5-hour and weekly)"),
+    ("usagechart", "plan usage over the last 30 days, as a chart (/usagechart 7 for a week)"),
     ("login", "renew Claude's login from here"),
     ("server", "load of the machine the bot runs on"),
     ("restart", "restart the bot (takes up a git pull)"),
@@ -305,6 +307,7 @@ class Bot:
         self.cli_path = cli_path
         self.cli_env = cli_env
         self.store = Store(cfg.state_dir / "sessions.json")
+        usage.history = cfg.state_dir / "usage_history.jsonl"
         self.sessions: dict[Key, Session] = {}
         self.typing: dict[Key, asyncio.Task] = {}
         self.albums: dict[str, uploads.AlbumCollector] = {}
@@ -375,6 +378,7 @@ class Bot:
         self.app.add_handler(CommandHandler("cost", self._cmd_cost, filters=allowed))
         self.app.add_handler(CommandHandler("tldr", self._cmd_tldr, filters=allowed))
         self.app.add_handler(CommandHandler("usage", self._cmd_usage, filters=allowed))
+        self.app.add_handler(CommandHandler("usagechart", self._cmd_usagechart, filters=allowed))
         self.app.add_handler(CommandHandler("login", self._cmd_login, filters=allowed))
         self.app.add_handler(CommandHandler("server", self._cmd_server, filters=allowed))
         self.app.add_handler(CallbackQueryHandler(self._on_button))
@@ -2451,6 +2455,28 @@ class Bot:
                 self._usage_later[key] = asyncio.create_task(self._send_usage_later(key))
             text += "\n\n⏳ I'll send a fresh reading here as soon as the endpoint allows it."
         await self._output(key).notice(text)
+
+    async def _cmd_usagechart(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """/usagechart [days]: how the plan usage went up and down, from the readings kept (up to 30 days)."""
+        key = self._key(update)
+        out = self._output(key)
+        try:
+            days = min(max(int((ctx.args or ["30"])[0]), 1), usagehist.KEEP_DAYS - 1)
+        except ValueError:
+            await out.notice("/usagechart takes a number of days, e.g. /usagechart 7")
+            return
+        try:
+            png = await asyncio.to_thread(usagehist.chart, usage.history, days)
+        except Exception as e:
+            log.exception("usage chart failed")
+            await out.notice(f"⚠️ Could not draw the chart: {e}")
+            return
+        if not png:
+            await out.notice("📉 Not enough readings yet: the bot keeps one every few minutes from now on.")
+            return
+        path = self.cfg.state_dir / "usage_chart.png"
+        path.write_bytes(png)
+        await out.send_path(path, caption=f"📈 Plan usage, last {days} day{'s' * (days > 1)}")
 
     async def _send_usage_later(self, key: Key) -> None:
         """/usage while the endpoint was rate-limited: the reading, once it lets the bot ask."""

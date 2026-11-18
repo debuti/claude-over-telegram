@@ -263,6 +263,7 @@ turns it off.
 | `/status`  | Workdir, mode, model, activity, context usage        |
 | `/cost`    | Estimated cost of the conversation                   |
 | `/usage`   | Plan usage: 5-hour and weekly limits                 |
+| `/usagechart [days]` | Plan usage over the last 30 days (or that many), as a chart: every reading is kept in `state/usage_history.jsonl`, at most one each 4 minutes, for a month |
 | `/login`   | Renew Claude's login from Telegram                   |
 | `/tldr`    | Shows the project's `TLDR.md`, kept by Claude       |
 | `/server`  | Machine health: load, CPU, memory, disk, busiest processes |

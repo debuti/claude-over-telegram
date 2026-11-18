@@ -2,12 +2,17 @@
 
 import asyncio
 import json
+import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
+
+from . import usagehist
+
+log = logging.getLogger(__name__)
 
 URL = "https://api.anthropic.com/api/oauth/usage"
 
@@ -47,6 +52,7 @@ _last: tuple[float, dict] | None = None  # (epoch, data) of the latest good read
 _retry_at = 0.0  # no request before this, after a 429
 _backoff = 0.0
 _lock: asyncio.Lock | None = None
+history: Path | None = None  # where every reading is kept for the chart (usagehist); None: nowhere
 BACKOFF_MIN, BACKOFF_MAX = 60.0, 900.0
 
 
@@ -203,6 +209,11 @@ async def fetch(cli: str, max_age: float = 0.0) -> dict:
             raise RateLimited(_retry_at)
         data = await _get(cli)
         _last, _backoff = (time.time(), data), 0.0
+        if history:
+            try:
+                usagehist.record(history, data)
+            except Exception:
+                log.exception("could not keep the usage reading")
         return data
 
 
