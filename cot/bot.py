@@ -401,9 +401,7 @@ class Bot:
     async def _report_outage(self) -> None:
         try:
             text = self.outages.report()
-            known = [(key, state) for key, state in self.store.items() if self._assigned(key)]
-            known.sort(key=lambda item: item[1].last_active, reverse=True)
-            for key, _ in known[:VERSION_NOTICE_TRIES]:
+            for key in self._bot_topics():
                 if await self._output(key).send_html(esc(text)):
                     self.outages.reported()
                     break
@@ -1428,16 +1426,20 @@ class Bot:
             log.exception("restart notice failed")
         path.unlink(missing_ok=True)
 
+    def _bot_topics(self) -> list[Key]:
+        """Where news about the bot itself goes: the topic working on the bot, then the most recent
+        ones (in case its topic was deleted)."""
+        known = [(key, state) for key, state in self.store.items() if self._assigned(key)]
+        known.sort(key=lambda item: (_inside(item[1].cwd, REPO_DIR), item[1].last_active), reverse=True)
+        return [key for key, _ in known[:VERSION_NOTICE_TRIES]]
+
     async def _announce_version(self) -> None:
         """Says once, quietly, that a new version is running; restarts on the same one say nothing."""
         seen = self.cfg.state_dir / "version"
         if seen.exists() and seen.read_text().strip() == __version__:
             return
-        known = [(key, state) for key, state in self.store.items() if self._assigned(key)]
-        # The one working on the bot itself made the update: it goes there, then to the most recent.
-        known.sort(key=lambda item: (_inside(item[1].cwd, REPO_DIR), item[1].last_active), reverse=True)
-        # The next ones in case its topic was deleted.
-        for key, _ in known[:VERSION_NOTICE_TRIES]:
+        known = self._bot_topics()
+        for key in known:
             if await self._output(key).send_html(f"🔄 Updated to v{__version__}", silent=True):
                 break
         else:
