@@ -65,6 +65,9 @@ class ConvState:
     # /advanced: Claude's options beyond model and mode ("effort", "thinking", "fallback", "turns", "budget",
     # "block"), as their picker's values; a missing one is Claude Code's default.
     advanced: dict[str, str] = field(default_factory=dict)
+    # General only: the plan-usage message kept up to date while Claude sleeps, and when it was last updated.
+    live_usage_msg: int | None = None
+    live_usage_at: float = 0.0
 
 
 def _migrate(v: dict) -> dict:

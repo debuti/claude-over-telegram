@@ -37,6 +37,7 @@ class Config:
     keepalive: float  # seconds after its last use a big conversation's cache is kept warm
     limit_reserve: bool  # near a plan limit, keep its last bit for keep-alives until it resets
     topic_titles: bool  # keep each topic's name showing its status
+    live_usage: float  # seconds between updates of the plan usage kept in General while Claude sleeps; 0: off
 
 
 def _limits(spec: str, cpus: str, memory: str) -> dict[str, tuple[str, str]]:
@@ -129,5 +130,6 @@ def load(workdir: Path) -> Config:
         keepalive=float(os.environ.get("KEEPALIVE_HOURS") or 1) * 3600,
         limit_reserve=os.environ.get("LIMIT_RESERVE", "true").lower() in ("1", "true", "yes"),
         topic_titles=os.environ.get("TOPIC_TITLES", "true").lower() in ("1", "true", "yes"),
+        live_usage=max(float(os.environ.get("LIVE_USAGE_MINUTES") or 5), 0) * 60,
         docker_exclude=frozenset(x for x in os.environ.get("DOCKER_EXCLUDE", "").replace(" ", "").split(",") if x),
     )

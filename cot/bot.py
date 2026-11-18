@@ -9,6 +9,7 @@ import secrets
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -1459,6 +1460,7 @@ class Bot:
                         await self._check_title(key, state)
                     if self.cfg.cache_alarms or self.cfg.keepalive > self.ttl or self.cfg.limit_reserve:
                         await self._check_alarm(key, state)
+                    await self._check_live_usage(key, state)
                 except Exception:
                     log.exception("login or plan limit check, cache alarm or keep-alive failed")
             try:
@@ -1615,7 +1617,7 @@ class Bot:
         sess = self.sessions.get(key)
         asleep = "" if sess and sess.connected else ", Claude is asleep"
         text = f"🧊 Cache expired{asleep}. The next message re-sends {costguard.kilo(state.context_tokens)} tokens."
-        if not self.cfg.api_key:
+        if not self.cfg.api_key and not self._live_usage_on(key):  # General has it in its own message
             text += "\n\n" + await self._usage_text()
         await self._output(key).send_html(esc(text))
 
@@ -1716,6 +1718,49 @@ class Bot:
         except Exception as e:
             log.exception("usage failed")
             return f"⚠️ Could not fetch usage: {e}"
+
+    def _live_usage_on(self, key: Key) -> bool:
+        return key[1] is None and self.cfg.live_usage > 0 and not self.cfg.api_key
+
+    async def _check_live_usage(self, key: Key, state: ConvState) -> None:
+        """General, while its Claude sleeps: one message with the plan usage, edited in place every few
+        minutes (no model call, no tokens). Taken down when Claude wakes; a new one at the bottom when it
+        sleeps again."""
+        if not self._live_usage_on(key):
+            return
+        sess = self.sessions.get(key)
+        bot = self.app.bot
+        if sess and (sess.connected or sess.pending):
+            if state.live_usage_msg:
+                try:
+                    await bot.delete_message(key[0], state.live_usage_msg)
+                except TelegramError as e:
+                    log.debug("could not delete the live usage: %s", e)
+                state.live_usage_msg, state.live_usage_at = None, 0.0
+                self.store.put(key, state)
+            return
+        now = time.time()
+        if state.live_usage_msg and now - state.live_usage_at < self.cfg.live_usage:
+            return
+        every = usage._duration(self.cfg.live_usage)
+        stamp = f"🔄 {datetime.now(timezone.utc):%H:%M} UTC, every {every} while Claude sleeps"
+        text = f"{await self._usage_text()}\n\n{stamp}"
+        state.live_usage_at = now
+        if state.live_usage_msg:
+            try:
+                await bot.edit_message_text(text, key[0], state.live_usage_msg)
+                self.store.put(key, state)
+                return
+            except BadRequest as e:
+                if "not modified" in str(e).lower():
+                    self.store.put(key, state)
+                    return
+                log.debug("live usage gone (%s), sending a new one", e)
+            except TelegramError as e:
+                log.debug("could not update the live usage: %s", e)
+                return
+        state.live_usage_msg = await self._output(key).send_html(esc(text), silent=True)
+        self.store.put(key, state)
 
     async def _delete_alarm(self, key: Key) -> None:
         """Take down the conversation's last cache alarm: only the latest one says how things stand."""
