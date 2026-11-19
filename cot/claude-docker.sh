@@ -22,6 +22,10 @@ mounts="${COT_MOUNTS:-}"
 # outlives the container.
 home="${COT_HOME:-}"
 
+# The bot (a service start) and Claude may set up the same container at once: one at a time.
+exec 9>"${TMPDIR:-/tmp}/$COT_NAME.lock"
+flock 9
+
 # Same image, folder, home, claude binary and extra mounts as the running container, or start
 # anew. Limits don't count: docker update changes them in place, without stopping anything.
 spec="$COT_IMAGE $PWD $(stat -c %Y "$COT_CLAUDE")"
@@ -82,6 +86,17 @@ else
     docker update --cpus "$COT_CPUS" --memory "$COT_MEMORY" --memory-swap "$swap" "$COT_NAME" >/dev/null
 fi
 
+# COT_SERVICE: the project's .tg-service command, started detached instead of Claude (the
+# container stays while it runs).
+if [[ -n "${COT_SERVICE:-}" ]]; then
+    service_args=(exec -d -w "$PWD")
+    [[ -z "$home" ]] || service_args+=(-e "NPM_CONFIG_PREFIX=$HOME/.local")
+    path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    [[ -z "$home" ]] || path="$HOME/.local/bin:$path"
+    [[ -z "${COT_PATH:-}" ]] || path="$COT_PATH:$path"
+    exec docker "${service_args[@]}" -e "PATH=$path" "$COT_NAME" sh -c "$COT_SERVICE" 9>&-
+fi
+
 # A Claude from an earlier connection may still run: docker exec doesn't stop it when
 # the bot goes away. Two on the same conversation answer into the void, so end it.
 docker exec "$COT_NAME" sh -c 'pkill -x claude || exit 0
@@ -106,4 +121,5 @@ while IFS= read -r name; do
     esac
 done < <(compgen -e)
 
+exec 9>&-  # the lock is for the setup, not for Claude's lifetime
 exec docker "${exec_args[@]}" "$COT_NAME" claude "$@"

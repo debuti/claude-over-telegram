@@ -93,6 +93,11 @@ COMMANDS = [
 
 # /tldr: the summary Claude keeps at the root of each project, and how much of it fits a message.
 TLDR_FILE = "TLDR.md"
+# A project's persistent service: its first line that isn't blank or a # comment is a
+# command, started in the project's container when the bot starts and every
+# SERVICE_EVERY after (so it must do nothing when already running).
+SERVICE_FILE = ".tg-service"
+SERVICE_EVERY = 5 * 60
 TLDR_MAX = 3500
 
 # What the CLI keeps between its auto-compact window and the size it compacts at: room for
@@ -307,6 +312,7 @@ class Bot:
         self.cli_path = cli_path
         self.cli_env = cli_env
         self.store = Store(cfg.state_dir / "sessions.json")
+        self._services_at = 0.0  # monotonic time services were last checked
         usage.history = cfg.state_dir / "usage_history.jsonl"
         self.sessions: dict[Key, Session] = {}
         self.typing: dict[Key, asyncio.Task] = {}
@@ -1397,6 +1403,7 @@ class Bot:
             limit = state.limit_until or (state.prompt and state.prompt["kind"] == "limit")
             if state.held and self._assigned(key) and not limit and not state.login_lost_at:
                 await self._ask_hold(key)
+        await self._start_services()
         self._alarm_task = asyncio.create_task(self._alarm_loop())
 
     async def _cmd_restart(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1467,10 +1474,50 @@ class Bot:
                     await self._check_live_usage(key, state)
                 except Exception:
                     log.exception("login or plan limit check, cache alarm or keep-alive failed")
+            if time.monotonic() - self._services_at >= SERVICE_EVERY:
+                await self._start_services()
             try:
                 await self._restart_if_outdated()
             except Exception:
                 log.exception("restart check failed")
+
+    @staticmethod
+    def _service_command(cwd: Path) -> str | None:
+        try:
+            lines = (cwd / SERVICE_FILE).read_text().splitlines()
+        except OSError:
+            return None
+        return next((ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")), None)
+
+    async def _start_services(self) -> None:
+        """Each folder with a .tg-service gets its command run in its container (made if
+        need be), with no Claude and no tokens: it survives restarts and reboots that way."""
+        self._services_at = time.monotonic()
+        if not self.cfg.docker:
+            return
+        # One container per folder: that of its most recently active topic.
+        topics: dict[Path, tuple[Key, ConvState]] = {}
+        for key, state in self.store.items():
+            cwd = Path(state.cwd)
+            if key[1] is None or not self._assigned(key) or cwd.name in self.cfg.docker_exclude:
+                continue
+            if cwd not in topics or state.last_active > topics[cwd][1].last_active:
+                topics[cwd] = (key, state)
+        for cwd, (key, state) in topics.items():
+            command = self._service_command(cwd)
+            if not command:
+                continue
+            sess = self.sessions.get(key)
+            name = sess.container if sess else container.agent_name(state.title or cwd.name, *key)
+            env = {**os.environ, **self._runner(cwd)["cli_env"], "COT_NAME": name, "COT_SERVICE": command}
+            try:
+                done = await asyncio.to_thread(
+                    subprocess.run, [self.cli_path], cwd=cwd, env=env, capture_output=True, text=True, timeout=600,
+                )
+                if done.returncode:
+                    log.warning("service of %s failed to start: %s", cwd.name, done.stderr.strip()[-500:])
+            except Exception:
+                log.exception("service of %s failed to start", cwd.name)
 
     def _all_asleep(self) -> bool:
         """No Claude process up, no cache left to lose and nothing under way: a restart costs nothing."""

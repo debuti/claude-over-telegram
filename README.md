@@ -403,6 +403,17 @@ to it with its full context; `/new` starts a fresh one. Don't keep the same
 conversation open in the terminal and in Telegram at once: both would append to
 the same transcript.
 
+## Persistent services
+
+A project that must keep something running (its own bot, a server) can name its
+start command in a `.tg-service` file in its folder: the first line that isn't
+blank or a `#` comment. With `SANDBOX_DOCKER` on, the bot runs it in that
+project's container (making the container if need be, for its most recently
+active topic) when it starts and every 5 minutes after, without waking Claude or
+spending tokens. So the command must do nothing when the service already runs
+(check a pid file, say) and start it detached. The container stays while the
+service runs; after a reboot the bot (as a systemd service) brings it back.
+
 ## Confinement
 
 Besides what follows, the system prompt tells Claude to stick to the project in its
